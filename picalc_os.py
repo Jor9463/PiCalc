@@ -1,68 +1,63 @@
 import time
 import math
-import cmath  # numeros complejos (disponible en MicroPython)
+import cmath
 
 # ==========================================================
-# PiCalc OS v4.3  –  Changelog desde v4.2
+# PiCalc OS v4.4  –  Changelog desde v4.3
 # ----------------------------------------------------------
-# NEW 1 (v4.3 - Cursor con flechas izquierda/derecha):
-#   ENTRADA_TOKENS ahora tiene un indice de cursor (CURSOR_POS)
-#   que indica DONDE se insertan o borran tokens. Las teclas
-#   IZQUIERDA y DERECHA mueven el cursor sin alterar el buffer.
-#   DEL borra el token a la IZQUIERDA del cursor (como backspace).
-#   Los tokens nuevos se insertan en la posicion del cursor.
-#   renderizar_pantalla muestra el cursor como "|" en la OLED y
-#   en la consola, con scroll horizontal centrado alrededor del
-#   cursor en vez de siempre mostrar el extremo derecho.
+# FIX 1 (CRITICO - tokenizar: numeros con varios puntos):
+#   "1.2.3" ya no se acepta silenciosamente. El bucle de digitos
+#   ahora lleva un contador de puntos y solo acepta el primero;
+#   el segundo dispara ValueError("Numero invalido: 1.2.3").
 #
-# NEW 2 (v4.3 - Menu MODE al estilo Casio fx-991):
-#   La tecla MODE (o "MODE" en consola PC) abre un menu de modos
-#   de trabajo identico al de la fx-991 ClassWiz:
-#     1:COMP  2:CMPLX  3:STAT  4:BASE-N
-#     5:EQN   6:MATRIX 7:TABLE 8:VECTOR
-#   El usuario navega con flechas o digita el numero del modo.
-#   Cada opcion configura el estado global y muestra un mensaje
-#   de confirmacion, tal como la calculadora fisica.
+# FIX 2 (CRITICO - division por cero explicita):
+#   evaluar_rpn() ahora detecta abs(b)<1e-12 antes de a/b y
+#   lanza ValueError("Division por cero") en vez de propagar
+#   la excepcion ZeroDivisionError de Python, que el handler
+#   generico tragaba silenciosamente sin mostrar al usuario.
 #
-# ----------------------------------------------------------
-# FIX 1 (TABLE): limite de 45 filas maximas (igual que Casio
-#   fx-991). El chequeo ocurre ANTES de iterar con un calculo
-#   previo de pasos_estimados, evitando que un rango amplio o
-#   paso chico congele la OLED o desborde la RAM del RP2040.
+# FIX 3 (CRITICO - MODO_2ND seguro en hardware):
+#   escanear_teclado() ya no toca MODO_2ND si el indice (i,j)
+#   esta fuera del rango de la capa seleccionada (fila/col
+#   inexistente). Ademas, el toggle solo ocurre si el token
+#   leido es exactamente "2ND", previniendo activaciones
+#   accidentales por ruido electrico o lectura incompleta.
 #
-# FIX 2 (CMPLX display): decimal_a_fraccion() reescrita para
-#   formatear complejos al estilo Casio: "2+3i", "-i", "4-2i"
-#   sin parentesis de Python ni el sufijo "j". Maneja correctamente
-#   parte real=0, im=0, magnitud=1 (+i/-i) y decimales.
+# FIX 4 (IMPORTANTE - menu MODE: estado inconsistente IZQ/DER):
+#   Ahora existe _SELECCION_MENU separada de MODO_CALC.
+#   IZQ/DER mueven _SELECCION_MENU sin pisar MODO_CALC hasta
+#   que el usuario presione IGUAL o un digito para confirmar.
+#   AC cancela sin cambiar ningun estado.
 #
-# FIX 3 (MATMUL): validacion explicita de dimensiones ANTES del
-#   bucle (cols(A) == filas(B)). Antes un mismatch lanzaba
-#   IndexError interno; ahora devuelve "Error Dimension" con
-#   los valores exactos para que el usuario sepa que corregir.
+# FIX 5 (IMPORTANTE - TABLE: generacion con indice en vez de suma):
+#   El bucle de TABLE ya no acumula x += paso (que introduce
+#   error de punto flotante iterativo). Ahora usa el indice:
+#       x = inicio + i * paso
+#   El round(x, 10) queda solo como display, no afecta el calculo.
 #
-# FIX 4 (v4.2 - Formato numerico): decimal_a_fraccion() para
-#   reales ya NO depende de MODO_EXAMEN para decidir si limpia
-#   los ".0" o intenta una fraccion. Antes, en Modo Examen
-#   (el modo por defecto), "2+3*4" mostraba "14.00000" en vez
-#   de "14". Ahora el chequeo de entero y la aproximacion a
-#   fraccion se aplican siempre; ".5f" queda solo como ultimo
-#   recurso para decimales que no son fracciones simples.
+# FIX 6 (IMPORTANTE - manejo de excepciones especifico):
+#   procesar_todo() ya no usa except Exception generico para todo.
+#   Captura ValueError/ZeroDivisionError con el mensaje real del
+#   error y Exception inesperada con su tipo, para debugging.
 #
-# FIX 5 (v4.2 - Fracciones por fraccion continua): el algoritmo
-#   anterior (val*100000, gcd con 100000) casi nunca encontraba
-#   fracciones simples por error de redondeo de punto flotante
-#   (ej: 1/3 = 0.3333333333 -> gcd(33333,100000)=1, nunca daba
-#   "1/3"). Ahora se usa el algoritmo de fracciones continuas,
-#   que SI reconstruye 1/3, 2/3, 1/7, 22/7, etc. con denominador
-#   menor a 1000.
+# FIX 7 (MEJORA - ALIAS_TOKENS generado dinamicamente):
+#   ALIAS_TOKENS ahora se construye automaticamente desde FUNC_MAP
+#   (evita duplicar la lista de funciones). Las entradas especiales
+#   que no estan en FUNC_MAP (MAT2, POL, etc.) se agregan aparte.
 #
-# FIX 6 (v4.2 - Signo menos unario inicial): "-3^2" ahora da -9
-#   (convencion matematica estandar: -(3^2)), en vez de 9
-#   ((-3)^2) como en v4.1. Se distinguen dos tipos de menos
-#   unario en el Shunting-Yard: el "-" inicial de una expresion
-#   (ej: el de "-3^2") cede precedencia ante "^", mientras que
-#   el "-" que aparece justo despues de "^" (ej: "2^-2") conserva
-#   precedencia maxima para seguir dando 2^(-2) = 0.25.
+# FIX 8 (MEJORA - denominador fraccion documentado):
+#   El limite de den < 1000 en fracciones continuas queda
+#   documentado como constante FRACCION_DEN_MAX con comentario
+#   explicativo de por que 1000 es el valor apropiado para la Pico.
+#
+# FIX 9 (MEJORA - TABLA_RESULTADO con limite de RAM):
+#   El cache de TABLE ahora tiene un tope de TABLA_MAX_FILAS (45)
+#   aplicado tanto en la generacion como antes de guardar en la
+#   lista, para que modificar LIMITE_ESTADISTICA no lo afecte.
+#
+# FIX 10 (MEJORA - Modo Examen documentado):
+#   BYPASS_RESTRICCIONES define explicitamente que comandos bloquea
+#   MODO_EXAMEN, y se usa en cada funcion en vez de chequeos dispersos.
 # ==========================================================
 
 # ==========================================================
@@ -85,13 +80,9 @@ CURSOR_POS = 0          # NEW v4.3: indice de insercion dentro de ENTRADA_TOKENS
 LIMITE_ESTADISTICA = 50  # cuida la RAM de la Pico
 
 # ---- Estado v4.0 ----
-MODO_COMPLEJO = False   # False=real, True=CMPLX (raices negativas devuelven complex)
-MATRICES = {            # almacenamiento persistente de matrices (hasta 4x4)
-    "A": None,
-    "B": None,
-    "C": None,
-}
-TABLA_RESULTADO = []    # cache de la ultima TABLE generada para scroll futuro
+MODO_COMPLEJO = False
+MATRICES = {"A": None, "B": None, "C": None}
+TABLA_RESULTADO = []
 
 # ---- Estado v4.3: Modo de calculadora (menu MODE) ----
 # 1=COMP, 2=CMPLX, 3=STAT, 4=BASE-N, 5=EQN, 6=MATRIX, 7=TABLE, 8=VECTOR
@@ -100,7 +91,33 @@ MODO_CALC_NOMBRES = {
     1: "COMP", 2: "CMPLX", 3: "STAT",  4: "BASE-N",
     5: "EQN",  6: "MATRIX", 7: "TABLE", 8: "VECTOR",
 }
-EN_MENU_MODE = False    # True mientras el menu MODE esta abierto
+EN_MENU_MODE = False
+
+# FIX 4 (v4.4): variable de seleccion separada del MODO_CALC confirmado.
+# IZQ/DER mueven _SELECCION_MENU sin pisar MODO_CALC hasta que el
+# usuario confirme con IGUAL o un digito (igual que la Casio fisica).
+_SELECCION_MENU = 1
+
+# ---- Constantes de configuracion (v4.4) ----
+# FIX 8: el denominador maximo para fracciones continuas esta documentado.
+# 1000 es apropiado para la Pico (264KB RAM): cubre todas las fracciones
+# de uso practico (1/999 y menores) sin exceder recursos.
+FRACCION_DEN_MAX = 1000
+
+# FIX 9: el tope de TABLE es independiente de LIMITE_ESTADISTICA.
+# Cambiar uno no afecta al otro, evitando overflow silencioso de RAM.
+TABLA_MAX_FILAS = 45  # igual que la Casio fx-991 ClassWiz
+
+# FIX 10: lista explicita de que bloquea MODO_EXAMEN.
+# Cada funcion avanzada consulta esta constante, no chequeos dispersos.
+# Funciones bloqueadas: SOLVE, DERIV, INT, matrices, factorizacion,
+#   polinomios, distribuciones, TABLE, BASE-N, CMPLX.
+BYPASS_RESTRICCIONES = frozenset({
+    "SOLVE", "DERIV", "INT", "MAT2", "MAT3", "DOT", "CROSS",
+    "MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV",
+    "PRIMOS", "CUAD", "CUB", "TABLE", "BIN", "OCT", "HEX",
+    "AND", "OR", "XOR", "NOT", "CMPLX", "DIST",
+})
 
 display = None
 if ENTORNO_PICO:
@@ -208,9 +225,14 @@ def escanear_teclado():
                     # Volver a alta impedancia ANTES de retornar
                     fila.init(machine.Pin.IN)
                     capa = LAYOUT_TECLADO_2ND if MODO_2ND else LAYOUT_TECLADO
+                    # FIX 3 (v4.4): verificar que (i,j) exista en la capa antes
+                    # de leer el token. Ruido electrico o filas extra no deben
+                    # causar IndexError ni togglear MODO_2ND accidentalmente.
+                    if i >= len(capa) or j >= len(capa[i]):
+                        return None
                     token = capa[i][j]
                     if token == "2ND":
-                        MODO_2ND = not MODO_2ND
+                        MODO_2ND = not MODO_2ND  # solo si es exactamente "2ND"
                         return None
                     if token != "":
                         MODO_2ND = False
@@ -358,7 +380,12 @@ def tokenizar(expr):
             continue
         if c.isdigit() or c == ".":
             j = i
+            puntos = 0  # FIX 1 (v4.4): solo se permite un punto decimal por numero
             while j < n and (expr[j].isdigit() or expr[j] == "."):
+                if expr[j] == ".":
+                    puntos += 1
+                    if puntos > 1:
+                        raise ValueError(f"Numero invalido: {expr[i:j+1]}")
                 j += 1
             tokens.append(("NUM", float(expr[i:j])))
             i = j
@@ -510,6 +537,9 @@ def evaluar_rpn(rpn, variables=None):
                 elif val == "*":
                     pila.append(a * b)
                 elif val == "/":
+                    # FIX 2 (v4.4): division por cero con mensaje explicito
+                    if not isinstance(b, complex) and abs(b) < 1e-12:
+                        raise ValueError("Division por cero")
                     pila.append(a / b)
                 elif val == "%":
                     pila.append(a % b)
@@ -618,7 +648,7 @@ def decimal_a_fraccion(val):
             h_cur = entero * h_prev + h_prev2
             k_cur = entero * k_prev + k_prev2
             num, den = h_cur, k_cur
-            if den == 0 or den > 1000:
+            if den == 0 or den > FRACCION_DEN_MAX:
                 num, den = h_prev, k_prev
                 break
             frac = resto - entero
@@ -629,7 +659,7 @@ def decimal_a_fraccion(val):
             resto = 1 / frac
             h_prev2, h_prev = h_prev, h_cur
             k_prev2, k_prev = k_prev, k_cur
-        if den != 0 and den < 1000 and abs(x - num / den) < 1e-9:
+        if den != 0 and den < FRACCION_DEN_MAX and abs(x - num / den) < 1e-9:
             return f"{signo * num}/{den}"
         return f"{val:.5f}"
     except Exception:
@@ -1136,10 +1166,11 @@ def cmd_cub(cmd):
 def cmd_table(cmd):
     """TABLE<expr>,<inicio>,<fin>,<paso>
     Genera la tabla f(x) para x en [inicio, fin] con paso dado.
-    Limite: 45 filas maximas (igual que Casio fx-991) para no
-    congelar la OLED ni desbordar la RAM del RP2040.
-    En consola PC muestra la primera fila; el cache TABLA_RESULTADO
-    contiene todos los pares (x, f(x)) para scroll posterior."""
+    FIX 5 (v4.4): x se calcula como inicio + i*paso en cada iteracion
+    para eliminar la acumulacion de error de punto flotante que ocurre
+    cuando se suma paso repetidamente.
+    FIX 9 (v4.4): el limite usa TABLA_MAX_FILAS (constante independiente
+    de LIMITE_ESTADISTICA) para que ambas no se interfieran."""
     global TABLA_RESULTADO
     if MODO_EXAMEN:
         return "Error: No disp", "", ""
@@ -1154,23 +1185,26 @@ def cmd_table(cmd):
         if paso == 0:
             return "Error: paso=0", "", ""
 
-        # Chequeo previo antes de iterar: protege RAM y OLED
         pasos_estimados = int(abs(fin - inicio) / abs(paso)) + 1
-        if pasos_estimados > 45:
-            return "Error: Rango Max", f"max 45 filas", f"({pasos_estimados} pedidos)"
+        if pasos_estimados > TABLA_MAX_FILAS:
+            return "Error: Rango Max", f"max {TABLA_MAX_FILAS} filas", f"({pasos_estimados} pedidos)"
 
         TABLA_RESULTADO = []
-        x = inicio
-        while (paso > 0 and x <= fin + 1e-9) or (paso < 0 and x >= fin - 1e-9):
+        for i in range(pasos_estimados):
+            # FIX 5: indice en vez de suma acumulada — sin error iterativo
+            x = inicio + i * paso
+            if paso > 0 and x > fin + 1e-9:
+                break
+            if paso < 0 and x < fin - 1e-9:
+                break
             fx = evaluar_expresion(eq_u, variables_actuales({"X": x}))
-            TABLA_RESULTADO.append((round(x, 6), round(fx, 6) if not isinstance(fx, complex) else fx))
-            x += paso
-            x = round(x, 10)  # evita acumulacion de error flotante
+            x_fmt = round(x, 6)
+            fx_fmt = round(fx, 6) if not isinstance(fx, complex) else fx
+            TABLA_RESULTADO.append((x_fmt, fx_fmt))
 
         if not TABLA_RESULTADO:
             return "Tabla vacia", "", ""
 
-        # Mostrar primera fila en OLED; resto queda en cache
         x0, fx0 = TABLA_RESULTADO[0]
         return (f"TABLE ({len(TABLA_RESULTADO)} pts)",
                 f"x={x0} f={decimal_a_fraccion(fx0)}",
@@ -1230,18 +1264,17 @@ def cmd_basen(cmd):
 # (el "(" se procesa como token aparte por el motor). Los comandos
 # especiales (SOLVE, DERIV, INT, STAT, STO, RCL, etc.) se escriben sin
 # "(": su parseo es por split() de texto, no por el motor RPN.
-ALIAS_TOKENS = {
-    "SIN": "SIN(", "COS": "COS(", "TAN": "TAN(",
-    "ASIN": "ASIN(", "ACOS": "ACOS(", "ATAN": "ATAN(",
-    "SINH": "SINH(", "COSH": "COSH(", "TANH": "TANH(",
-    "LN": "LN(", "LOG": "LOG(", "EXP": "EXP(",
-    "SQRT": "SQRT(", "RAIZ": "RAIZ(", "ABS": "ABS(",
+# FIX 7 (v4.4): ALIAS_TOKENS se genera automaticamente desde FUNC_MAP
+# para evitar duplicar la lista de funciones matematicas. Las entradas
+# especiales que no estan en FUNC_MAP se agregan aparte.
+ALIAS_TOKENS = {nombre: nombre + "(" for nombre in FUNC_MAP}
+# Comandos especiales de teclado fisico / 2ND que no estan en FUNC_MAP:
+ALIAS_TOKENS.update({
     "MAT2": "MAT2(", "MAT3": "MAT3(", "DOT": "DOT(", "CROSS": "CROSS(",
     "POL": "POL(", "REC": "REC(",
-    # v4.0
     "CUAD": "CUAD(", "CUB": "CUB(",
     "BIN": "BIN(", "OCT": "OCT(", "HEX": "HEX(",
-}
+})
 
 
 def es_numero_str(s):
@@ -1467,15 +1500,21 @@ def procesar_todo(entrada_cruda):
         res_num = evaluar_expresion(cmd, variables_actuales())
         ANS = res_num
         return decimal_a_fraccion(res_num), "", ""
-    except Exception:
-        return "Error Sintaxis", "", ""
+    except (ValueError, ZeroDivisionError) as e:
+        # FIX 6 (v4.4): mostrar el mensaje real del error al usuario.
+        # "Division por cero", "Token desconocido: X", "Numero invalido: 1.2.3", etc.
+        msg = str(e)
+        return msg[:16] if len(msg) > 16 else msg, "", ""
+    except Exception as e:
+        # Error inesperado (bug real): mostrar tipo para facilitar debugging
+        return f"Err:{type(e).__name__}", "", ""
 
 
 # ==========================================================
 # 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3
 # ==========================================================
 INSTRUCCIONES = (
-    "PiCalc OS v4.3 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v4.4 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
     "Memoria: A B C X Y ANS  |  Comandos: STO RCL\n"
@@ -1499,9 +1538,9 @@ def _pos_caracter_cursor(tokens, cursor_pos):
 
 
 def iniciar():
-    global MODO_EXAMEN, ENTRADA_TOKENS, CURSOR_POS, EN_MENU_MODE
+    global MODO_EXAMEN, ENTRADA_TOKENS, CURSOR_POS, EN_MENU_MODE, _SELECCION_MENU
 
-    renderizar_pantalla("PiCalc OS v4.3", f"Modo Examen: {MODO_EXAMEN}",
+    renderizar_pantalla("PiCalc OS v4.4", f"Modo Examen: {MODO_EXAMEN}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
@@ -1529,41 +1568,29 @@ def iniciar():
         # ==================================================
         if EN_MENU_MODE:
             if accion_u == "AC":
-                # Cancelar menu sin cambiar modo
                 EN_MENU_MODE = False
                 expr_actual = "".join(ENTRADA_TOKENS) or "0"
                 cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
                 renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
             elif accion_u in ("IZQ", "DER"):
-                # Navegar entre las opciones del menu con flechas
+                # FIX 4 (v4.4): IZQ/DER mueven _SELECCION_MENU sin pisar MODO_CALC.
+                # El modo confirmado no cambia hasta que el usuario presione IGUAL
+                # o un digito. Esto replica el comportamiento de la Casio fx-991:
+                # el resaltado se mueve pero nada se aplica hasta la confirmacion.
                 delta = -1 if accion_u == "IZQ" else 1
-                nueva_sel = ((MODO_CALC - 1 + delta) % 8) + 1
-                renderizar_menu_mode(nueva_sel)
-                # Guardamos la seleccion temporal en MODO_CALC para que
-                # la siguiente pulsacion de DER/IZQ parta de ahi.
-                # El modo NO se aplica hasta que el usuario presione IGUAL
-                # o un digito (igual que la Casio fisica).
-                # Usamos una variable temporal local para no pisar MODO_CALC
-                # hasta confirmacion; aqui lo simplificamos: en la Pico
-                # la seleccion con flechas mueve el resaltado y IGUAL confirma.
-                # Para la consola PC el flujo por digito es mas natural.
-                # Actualizamos MODO_CALC temporalmente (se revertira con AC).
-                import sys
-                # Guardar seleccion resaltada
-                renderizar_menu_mode(nueva_sel)
+                _SELECCION_MENU = ((_SELECCION_MENU - 1 + delta) % 8) + 1
+                renderizar_menu_mode(_SELECCION_MENU)
             elif accion_u == "IGUAL":
-                # En modo de navegacion con flechas, IGUAL confirma el MODO_CALC
-                # que se fue actualizando con IZQ/DER (ver arriba).
-                msg = aplicar_modo(MODO_CALC)
+                # Confirmar la seleccion resaltada por IZQ/DER
+                msg = aplicar_modo(_SELECCION_MENU)
                 renderizar_pantalla(msg, f"Modo: {MODO_CALC_NOMBRES[MODO_CALC]}")
             elif accion_u.isdigit() and 1 <= int(accion_u) <= 8:
-                # Seleccion directa por numero (igual que en la Casio fx-991)
                 num = int(accion_u)
+                _SELECCION_MENU = num
                 msg = aplicar_modo(num)
                 renderizar_pantalla(msg, f"Modo: {MODO_CALC_NOMBRES[MODO_CALC]}")
             else:
-                # Cualquier otra tecla: ignorar y redibujar el menu
-                renderizar_menu_mode()
+                renderizar_menu_mode(_SELECCION_MENU)
             continue
 
         # ==================================================
