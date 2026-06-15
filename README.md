@@ -114,6 +114,10 @@ El firmware ha evolucionado a través de dos grandes etapas: la etapa de **Simul
     * **FUNCIONES COMPLEJAS AVANZADAS:** Integración de comandos `CONJ()` y `ARG()`. `CONJ` calcula el conjugado aritmético de un complejo ($a - bi$) y `ARG` extrae su argumento o ángulo de fase en el plano complejo, adaptándose de forma dinámica al formato de ángulos seleccionado.
     * **CORRECCIÓN CRÍTICA EN ÁNGULOS (RADIANES REALES):** Se solucionó un bug heredado de la v4.5 donde el flag `MODO_ANGULOS = "RAD"` se guardaba en la Flash pero era ignorado por el motor de evaluación. Ahora, las funciones `SIN/COS/TAN` y sus inversas procesan e interpretan los radianes de forma directa y nativa sin forzar conversiones a grados.
     * **FORMATOS DE PANTALLA CIENTÍFICOS (`SCI` y `NORM`):** Evolución del menú `SETUP`. Se añade soporte completo para visualización en notación científica (`SCI` con selección de 0 a 9 dígitos significativos) y regreso a formato decimal estándar (`NORM 1` y `NORM 2`), emulando perfectamente las restricciones visuales de la Casio física.
+* **picalc_os_v5.1 (Rediseño del Formateador de Pantalla y Fix en SCI/NORM):**
+    * **CORRECCIÓN EN FORMATEO DE PANTALLA (`SCI` / `NORM`):** Se reescribió la función fundamental `formatear_numero_setup()` corrigiendo fallos de desborde y falsos truncamientos visuales. Ahora el sistema procesa de forma precisa la separación de mantisa y exponente en notación científica (`SCI`) respetando estrictamente los dígitos significativos elegidos por el usuario de 0 a 9.
+    * **ESTABILIZACIÓN DEL DELIMITADOR DINÁMICO:** Reparación del bug crítico vinculado a `_LIMIT_SCI_NORM` que generaba comportamientos inesperados en las salidas decimales estándar. Las transiciones entre el formato condensado y el formato expandido (`NORM 1` y `NORM 2`) ahora responden a los umbrales matemáticos correctos sin pisotear la memoria temporal.
+    * **REGLAS DE TRUNCAMIENTO SEGURO:** Optimización de la lógica para limpiar los restos flotantes redundantes (como los molestos `.0`) en números enteros grandes o aproximaciones muy cercanas a cero, garantizando una salida gráfica ultra limpia en la pantalla OLED.
     * 
 ---
 
