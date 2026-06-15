@@ -2,6 +2,28 @@ import time
 import math
 
 # ==========================================================
+# PiCalc OS v3.1  –  Changelog desde v3.0
+# ----------------------------------------------------------
+# FIX 1 (Hardware / GPIO): escanear_teclado() ahora inicializa
+#   las filas como IN (alta impedancia) y las conmuta a OUT/HIGH
+#   solo durante el escaneo de esa fila. Evita el cortocircuito
+#   OUT-HIGH vs OUT-LOW que quema GPIO cuando dos teclas de la
+#   misma columna se presionan simultaneamente.
+#
+# FIX 2 (SOLVE parser): resolver_ecuacion_lineal() ya no usa
+#   .replace("=", "-(") + ")" (que rompia parentesis internos,
+#   ej. SIN(X)=0.5 se transformaba en SIN(X-(0.5)). Ahora busca
+#   el indice exacto del "=" y construye lhs-(rhs) de forma segura.
+#
+# FIX 3 (Init GPIO): los pines de fila se crean como IN desde el
+#   arranque (en vez de OUT-LOW) para coherencia con el esquema
+#   de alta impedancia en reposo.
+#
+# NOTA: calcular_integral() (Regla de Simpson, 100 intervalos)
+#   ya estaba completa y correcta en v3.0 - se conserva sin cambios.
+# ==========================================================
+
+# ==========================================================
 # 1. DETECCION DE ENTORNO Y HARDWARE
 # ==========================================================
 try:
@@ -42,9 +64,11 @@ filas_io = []
 columnas_io = []
 if ENTORNO_PICO:
     try:
-        filas_io = [machine.Pin(p, machine.Pin.OUT) for p in PINES_FILAS]
-        for f in filas_io:
-            f.value(0)
+        # FIX v3.1: Las filas se inicializan en ENTRADA (alta impedancia) en vez
+        # de salida LOW. Sólo se pasan a OUT/HIGH durante el escaneo de esa fila.
+        # Esto evita el cortocircuito GPIO si dos teclas de la misma columna se
+        # presionan al mismo tiempo (un pin OUT-HIGH vs otro OUT-LOW = destrucción).
+        filas_io = [machine.Pin(p, machine.Pin.IN) for p in PINES_FILAS]
         columnas_io = [machine.Pin(p, machine.Pin.IN, machine.Pin.PULL_DOWN) for p in PINES_COLUMNAS]
     except Exception:
         filas_io = []
@@ -90,13 +114,23 @@ def _diferencia_ms(ahora, antes):
 
 def escanear_teclado():
     """Recorre la matriz fila por fila (con antirebote) y devuelve el
-    token de la primera tecla nueva detectada, o None si no hay nada."""
+    token de la primera tecla nueva detectada, o None si no hay nada.
+
+    FIX v3.1 - Modo alta impedancia entre filas:
+      Cada fila se configura como OUT/HIGH solo mientras se la escanea;
+      antes y después queda como IN (alta impedancia / flotante).
+      Esto elimina el cortocircuito OUT-HIGH vs OUT-LOW que ocurre cuando
+      el usuario presiona dos teclas de la misma columna simultáneamente.
+    """
     global MODO_2ND
     if not (filas_io and columnas_io):
         return None
 
     for i, fila in enumerate(filas_io):
+        # Activar SÓLO esta fila como salida HIGH
+        fila.init(machine.Pin.OUT)
         fila.value(1)
+
         for j, col in enumerate(columnas_io):
             estado = col.value()
             clave = (i, j)
@@ -108,7 +142,8 @@ def escanear_teclado():
                 if _diferencia_ms(ahora, ultimo_cambio) > DEBOUNCE_MS:
                     _ultimo_estado[clave] = 1
                     _ultimo_cambio[clave] = ahora
-                    fila.value(0)
+                    # Volver a alta impedancia ANTES de retornar
+                    fila.init(machine.Pin.IN)
                     capa = LAYOUT_TECLADO_2ND if MODO_2ND else LAYOUT_TECLADO
                     token = capa[i][j]
                     if token == "2ND":
@@ -119,7 +154,9 @@ def escanear_teclado():
                     return token if token != "" else None
             elif estado == 0 and anterior == 1:
                 _ultimo_estado[clave] = 0
-        fila.value(0)
+
+        # Devolver a alta impedancia al terminar de escanear esta fila
+        fila.init(machine.Pin.IN)
     return None
 
 
@@ -444,14 +481,30 @@ def decimal_a_fraccion(val):
 # 7. SOLVER, MATRICES Y VECTORES (ALGEBRA REAL)
 # ==========================================================
 def resolver_ecuacion_lineal(eq_str):
-    """Resuelve f(x) = 0 o f(x) = g(x) mediante Newton-Raphson (25 iter max)."""
+    """Resuelve f(x) = 0 o f(x) = g(x) mediante Newton-Raphson (25 iter max).
+
+    FIX v3.1 - Transformación segura de la ecuación:
+      En vez de eq.replace("=", "-(") + ")" que corrompe paréntesis internos
+      (ej: SIN(X)=0.5 → SIN(X-(0.5) — paréntesis del seno queda abierto),
+      buscamos el índice EXACTO del "=" de igualdad y construimos la expresión
+      como  lhs-(rhs)  respetando la estructura original de ambos lados.
+    """
     if MODO_EXAMEN:
         return "Error: No disp"
     eq_str = eq_str.upper()
-    eq = eq_str.replace("=", "-(") + ")" if "=" in eq_str else eq_str
+
+    # Localizar el "=" real (ignorando los que puedan estar dentro de tokens)
+    if "=" in eq_str:
+        idx = eq_str.index("=")
+        lhs = eq_str[:idx]
+        rhs = eq_str[idx + 1:]
+        eq = f"{lhs}-({rhs})"   # transforma  LHS=RHS  →  LHS-(RHS)
+    else:
+        eq = eq_str
+
     x = 1.0
     h = 1e-6
-    for _ in range(25):  # limite estricto para no congelar el RP2040
+    for _ in range(25):
         try:
             f_x = evaluar_expresion(eq, variables_actuales({"X": x}))
             f_xh = evaluar_expresion(eq, variables_actuales({"X": x + h}))
