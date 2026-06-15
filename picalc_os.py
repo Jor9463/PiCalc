@@ -3,31 +3,22 @@ import math
 import cmath  # numeros complejos (disponible en MicroPython)
 
 # ==========================================================
-# PiCalc OS v4.0  –  Changelog desde v3.2
+# PiCalc OS v4.1  –  Changelog desde v4.0
 # ----------------------------------------------------------
-# NUEVO 1 (CMPLX): modo numeros complejos activable con CMPLX.
-#   El motor RPN detecta el flag MODO_COMPLEJO y usa cmath en
-#   lugar de math para raices, trig y potencias. La unidad
-#   imaginaria se escribe "i" en la expresion (se traduce a 1j).
+# FIX 1 (TABLE): limite de 45 filas maximas (igual que Casio
+#   fx-991). El chequeo ocurre ANTES de iterar con un calculo
+#   previo de pasos_estimados, evitando que un rango amplio o
+#   paso chico congele la OLED o desborde la RAM del RP2040.
 #
-# NUEVO 2 (MAT): almacenamiento de matrices independientes
-#   MatA/MatB/MatC (hasta 4x4). Comandos: MATDEF, MATADD,
-#   MATMUL, MATTRANS, MATDET, MATINV. Las matrices se guardan
-#   en el diccionario MATRICES y persisten entre calculos.
+# FIX 2 (CMPLX display): decimal_a_fraccion() reescrita para
+#   formatear complejos al estilo Casio: "2+3i", "-i", "4-2i"
+#   sin parentesis de Python ni el sufijo "j". Maneja correctamente
+#   parte real=0, im=0, magnitud=1 (+i/-i) y decimales.
 #
-# NUEVO 3 (EQN): solucionador directo de polinomios.
-#   CUAD(a,b,c) -> formula cuadratica, devuelve X1 y X2 (reales
-#   o complejas si MODO_COMPLEJO activo).
-#   CUB(a,b,c,d) -> metodo de Cardano/depresion cubica.
-#
-# NUEVO 4 (TABLE): tabulacion de funciones.
-#   TABLE<expr>,<inicio>,<fin>,<paso>  ->  scroll en pantalla
-#   de pares (x, f(x)). Navegar con flechas (proxima version)
-#   o ver resultado completo en consola PC.
-#
-# NUEVO 5 (BASEN): conversion de base y logica de bits.
-#   BIN(n), OCT(n), HEX(n) muestran la representacion.
-#   Operadores AND, OR, XOR, NOT sobre enteros.
+# FIX 3 (MATMUL): validacion explicita de dimensiones ANTES del
+#   bucle (cols(A) == filas(B)). Antes un mismatch lanzaba
+#   IndexError interno; ahora devuelve "Error Dimension" con
+#   los valores exactos para que el usuario sepa que corregir.
 # ==========================================================
 
 # ==========================================================
@@ -497,19 +488,31 @@ def calcular_raiz_analitica(valor_str):
 
 
 def decimal_a_fraccion(val):
-    # Numeros complejos: formatear como "a+bi" o "bi"
+    # Numeros complejos: formatear al estilo Casio "a+bi" sin parentesis ni "j"
     if isinstance(val, complex):
-        r, im = val.real, val.imag
-        r = round(r, 8)
-        im = round(im, 8)
-        r_s = (str(int(r)) if r == int(r) else f"{r:.5f}") if r != 0 else ""
-        im_s = ("i" if abs(im) == 1 else f"{abs(im):.5f}i" if abs(im) != int(abs(im))
-                else f"{int(abs(im))}i")
+        r, im = round(val.real, 8), round(val.imag, 8)
+
+        def _fmt_parte(v):
+            """Formatea un float como entero si es exacto, o decimal si no."""
+            if v == int(v):
+                return str(int(v))
+            return f"{v:.5f}"
+
         if r == 0 and im == 0:
             return "0"
         if r == 0:
-            return f"{'-' if im < 0 else ''}{im_s}"
-        return f"{r_s}{'+' if im > 0 else '-'}{im_s}"
+            # Solo parte imaginaria: "-3i" o "2i" o "-i" o "i"
+            signo = "-" if im < 0 else ""
+            mag = abs(im)
+            return f"{signo}{'i' if mag == 1 else _fmt_parte(mag) + 'i'}"
+        if im == 0:
+            return _fmt_parte(r)
+        # Ambas partes no nulas: "2+3i", "2-3i", "2+i", "2-i"
+        signo = "+" if im > 0 else "-"
+        mag = abs(im)
+        im_str = "i" if mag == 1 else _fmt_parte(mag) + "i"
+        return f"{_fmt_parte(r)}{signo}{im_str}"
+
     if MODO_EXAMEN:
         return f"{val:.5f}"
     try:
@@ -842,15 +845,17 @@ def cmd_matadd(cmd):
 
 
 def cmd_matmul(cmd):
-    """MATMUL<A>,<B> -> MatA x MatB (producto matricial)."""
+    """MATMUL<A>,<B> -> MatA x MatB (producto matricial).
+    Requiere cols(A) == filas(B); de lo contrario devuelve Error Dimension."""
     if MODO_EXAMEN:
         return "Error: No disp", "", ""
     try:
         partes = cmd.split("MATMUL", 1)[-1].strip().split(",")
         a, b = _get_mat(partes[0].upper()), _get_mat(partes[1].upper())
         fa, ca, fb, cb = a["filas"], a["cols"], b["filas"], b["cols"]
+        # Validacion explicita de dimensiones ANTES de entrar al bucle
         if ca != fb:
-            return f"Dims: {fa}x{ca}", f"!= {fb}x{cb}", ""
+            return "Error Dimension:", f"cols(A)={ca} != filas(B)={fb}", "MATMUL requiere AxB: n*m x m*p"
         res = []
         for i in range(fa):
             for j in range(cb):
@@ -1025,8 +1030,10 @@ def cmd_cub(cmd):
 def cmd_table(cmd):
     """TABLE<expr>,<inicio>,<fin>,<paso>
     Genera la tabla f(x) para x en [inicio, fin] con paso dado.
-    En consola PC muestra la tabla completa.
-    En Pico muestra la primera fila; el resto queda en TABLA_RESULTADO para scroll."""
+    Limite: 45 filas maximas (igual que Casio fx-991) para no
+    congelar la OLED ni desbordar la RAM del RP2040.
+    En consola PC muestra la primera fila; el cache TABLA_RESULTADO
+    contiene todos los pares (x, f(x)) para scroll posterior."""
     global TABLA_RESULTADO
     if MODO_EXAMEN:
         return "Error: No disp", "", ""
@@ -1037,8 +1044,14 @@ def cmd_table(cmd):
         inicio = evaluar_expresion(partes[1], variables_actuales())
         fin    = evaluar_expresion(partes[2], variables_actuales())
         paso   = evaluar_expresion(partes[3], variables_actuales())
-        if paso == 0 or (fin - inicio) / paso > 200:
-            return "Paso invalido", "max 200 filas", ""
+
+        if paso == 0:
+            return "Error: paso=0", "", ""
+
+        # Chequeo previo antes de iterar: protege RAM y OLED
+        pasos_estimados = int(abs(fin - inicio) / abs(paso)) + 1
+        if pasos_estimados > 45:
+            return "Error: Rango Max", f"max 45 filas", f"({pasos_estimados} pedidos)"
 
         TABLA_RESULTADO = []
         x = inicio
@@ -1291,7 +1304,7 @@ INSTRUCCIONES = (
 def iniciar():
     global MODO_EXAMEN, ENTRADA_TOKENS
 
-    renderizar_pantalla("PiCalc OS v4.0", f"Modo Examen: {MODO_EXAMEN}",
+    renderizar_pantalla("PiCalc OS v4.1", f"Modo Examen: {MODO_EXAMEN}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
