@@ -98,6 +98,12 @@ El firmware ha evolucionado a través de dos grandes etapas: la etapa de **Simul
         5:EQN     6:MATRIX  7:TABLE  8:VECTOR
         ```
         Permite la selección rápida mediante flechas de navegación o por digitación directa del número de modo.
+* **picalc_os_v4.4 (Blindaje de Excepciones Críticas):**
+    * **FIX CRÍTICO EN TOKENIZACIÓN:** Se corrigió un fallo que aceptaba números con múltiples puntos decimales (ej: `1.2.3`). El bucle de dígitos ahora cuenta los puntos estrictamente; un segundo punto dispara un `ValueError`, protegiendo al motor RPN de colgarse.
+    * **CONTROL DE DIVISIÓN POR CERO:** El evaluador de pilas RPN ahora analiza si el denominador es menor a `1e-12` antes de ejecutar una división (`a/b`). Si se detecta, lanza un error controlado de división por cero explícito en la pantalla en lugar de propagar la excepción nativa de Python.
+    * **BLINDAJE ELÉCTRICO DEL MÓDULO SHIFT/2ND:** Se protegió el método `escanear_teclado()` contra ruido eléctrico o lecturas incompletas en la matriz física. El toggle de la segunda función (`MODO_2ND`) ahora solo se activa si el token es exactamente `"2ND"` y valida que las coordenadas de fila y columna existan dentro de la matriz.
+    * **CORRECCIÓN EN MENÚ MODE:** Se aisló la variable `_SELECCION_MENU` de la variable de estado `MODO_CALC`. Ahora las flechas IZQ/DER mueven la selección en pantalla de forma fluida sin pisar ni alterar el modo de cálculo actual hasta que el usuario presione efectivamente `IGUAL`.
+    * 
 
 ---
 
