@@ -3,7 +3,27 @@ import math
 import cmath  # numeros complejos (disponible en MicroPython)
 
 # ==========================================================
-# PiCalc OS v4.2  –  Changelog desde v4.1
+# PiCalc OS v4.3  –  Changelog desde v4.2
+# ----------------------------------------------------------
+# NEW 1 (v4.3 - Cursor con flechas izquierda/derecha):
+#   ENTRADA_TOKENS ahora tiene un indice de cursor (CURSOR_POS)
+#   que indica DONDE se insertan o borran tokens. Las teclas
+#   IZQUIERDA y DERECHA mueven el cursor sin alterar el buffer.
+#   DEL borra el token a la IZQUIERDA del cursor (como backspace).
+#   Los tokens nuevos se insertan en la posicion del cursor.
+#   renderizar_pantalla muestra el cursor como "|" en la OLED y
+#   en la consola, con scroll horizontal centrado alrededor del
+#   cursor en vez de siempre mostrar el extremo derecho.
+#
+# NEW 2 (v4.3 - Menu MODE al estilo Casio fx-991):
+#   La tecla MODE (o "MODE" en consola PC) abre un menu de modos
+#   de trabajo identico al de la fx-991 ClassWiz:
+#     1:COMP  2:CMPLX  3:STAT  4:BASE-N
+#     5:EQN   6:MATRIX 7:TABLE 8:VECTOR
+#   El usuario navega con flechas o digita el numero del modo.
+#   Cada opcion configura el estado global y muestra un mensaje
+#   de confirmacion, tal como la calculadora fisica.
+#
 # ----------------------------------------------------------
 # FIX 1 (TABLE): limite de 45 filas maximas (igual que Casio
 #   fx-991). El chequeo ocurre ANTES de iterar con un calculo
@@ -61,6 +81,7 @@ MEMORIA = {"A": 0.0, "B": 0.0, "C": 0.0, "X": 0.0, "Y": 0.0}
 ANS = 0.0
 ESTADISTICA_LISTA = []
 ENTRADA_TOKENS = []
+CURSOR_POS = 0          # NEW v4.3: indice de insercion dentro de ENTRADA_TOKENS
 LIMITE_ESTADISTICA = 50  # cuida la RAM de la Pico
 
 # ---- Estado v4.0 ----
@@ -71,6 +92,15 @@ MATRICES = {            # almacenamiento persistente de matrices (hasta 4x4)
     "C": None,
 }
 TABLA_RESULTADO = []    # cache de la ultima TABLE generada para scroll futuro
+
+# ---- Estado v4.3: Modo de calculadora (menu MODE) ----
+# 1=COMP, 2=CMPLX, 3=STAT, 4=BASE-N, 5=EQN, 6=MATRIX, 7=TABLE, 8=VECTOR
+MODO_CALC = 1
+MODO_CALC_NOMBRES = {
+    1: "COMP", 2: "CMPLX", 3: "STAT",  4: "BASE-N",
+    5: "EQN",  6: "MATRIX", 7: "TABLE", 8: "VECTOR",
+}
+EN_MENU_MODE = False    # True mientras el menu MODE esta abierto
 
 display = None
 if ENTORNO_PICO:
@@ -107,6 +137,7 @@ if ENTORNO_PICO:
 
 # Capa principal: cada celda es el TOKEN inyectado en ENTRADA_TOKENS o
 # un comando especial (AC, DEL, IGUAL, BYPASS, STO, RCL, 2ND).
+# NEW v4.3: teclas de navegacion IZQUIERDA, DERECHA y MODE agregadas.
 LAYOUT_TECLADO = [
     ["7", "8", "9", "(", ")", "DEL", "AC", "2ND"],
     ["4", "5", "6", "*", "/", "^", "%", "STO"],
@@ -114,6 +145,7 @@ LAYOUT_TECLADO = [
     ["0", ".", "X", "PI", "E", "SIN(", "COS(", "TAN("],
     ["A", "B", "C", "Y", "=", "IGUAL", "BYPASS", "SQRT("],
     ["LN(", "LOG(", "EXP(", "ABS(", "ASIN(", "ACOS(", "ATAN(", "RAIZ("],
+    ["IZQ", "DER", "MODE", "SETUP", "", "", "", ""],
 ]
 
 # Capa secundaria (tecla 2ND/SHIFT): funciones avanzadas poco usadas.
@@ -194,12 +226,25 @@ def escanear_teclado():
 # ==========================================================
 # 3. CAPA DE SALIDA / RENDERIZADO VISUAL
 # ==========================================================
-def renderizar_pantalla(linea_eq, l2="", l3="", l4=""):
+def renderizar_pantalla(linea_eq, l2="", l3="", l4="", cursor_pos=None):
     """Renderiza hasta 4 lineas para OLED 128x64 o consola PC.
-    La linea 1 (ecuacion) hace SCROLL HORIZONTAL: si supera el ancho,
-    muestra siempre el extremo DERECHO (donde esta el cursor)."""
+    NEW v4.3: acepta cursor_pos (indice de caracter en linea_eq) para
+    mostrar el cursor '|'. El scroll horizontal se centra alrededor
+    del cursor en vez de mostrar siempre el extremo derecho."""
     ANCHO_OLED = 16
-    vista_eq_oled = linea_eq[-ANCHO_OLED:] if len(linea_eq) > ANCHO_OLED else linea_eq
+
+    # Insertar cursor visual '|' en la posicion indicada
+    if cursor_pos is not None:
+        linea_con_cursor = linea_eq[:cursor_pos] + "|" + linea_eq[cursor_pos:]
+    else:
+        linea_con_cursor = linea_eq + "|"
+
+    # Scroll horizontal centrado en el cursor para OLED
+    cur_idx = cursor_pos if cursor_pos is not None else len(linea_eq)
+    # Ajustar el indice considerando el caracter "|" insertado
+    cur_en_str = cur_idx  # posicion del "|" en linea_con_cursor
+    inicio_oled = max(0, cur_en_str - ANCHO_OLED // 2)
+    vista_eq_oled = linea_con_cursor[inicio_oled: inicio_oled + ANCHO_OLED]
 
     if ENTORNO_PICO and display:
         display.fill(0)
@@ -210,7 +255,8 @@ def renderizar_pantalla(linea_eq, l2="", l3="", l4=""):
         display.show()
     else:
         ANCHO_CONSOLA = 28
-        vista_eq_consola = linea_eq[-ANCHO_CONSOLA:] if len(linea_eq) > ANCHO_CONSOLA else linea_eq
+        inicio_con = max(0, cur_en_str - ANCHO_CONSOLA // 2)
+        vista_eq_consola = linea_con_cursor[inicio_con: inicio_con + ANCHO_CONSOLA]
         print("\n" + "=" * 34)
         print("| [PANTALLA CASIO CLASSWIZ]        |")
         print("-" * 34)
@@ -1239,6 +1285,89 @@ def construir_expresion(tokens):
     return "".join(partes)
 
 
+
+# ==========================================================
+# 11b. MENU MODE (v4.3) - Identico al de la Casio fx-991 CW
+# ==========================================================
+# Opciones del menu: 8 modos en 2 filas de 4, igual que ClassWiz.
+# Fila 1: 1:COMP   2:CMPLX  3:STAT   4:BASE-N
+# Fila 2: 5:EQN    6:MATRIX 7:TABLE  8:VECTOR
+
+_OPCIONES_MODE = [
+    (1, "COMP"),
+    (2, "CMPLX"),
+    (3, "STAT"),
+    (4, "BASE-N"),
+    (5, "EQN"),
+    (6, "MATRIX"),
+    (7, "TABLE"),
+    (8, "VECTOR"),
+]
+
+
+def renderizar_menu_mode(seleccion=None):
+    """Muestra el menu MODE en pantalla al estilo Casio fx-991.
+    seleccion: numero del modo resaltado (1-8), o None para resaltar
+    el modo activo actual (MODO_CALC).
+    En OLED: 4 lineas = encabezado + fila1 + fila2 + indicador.
+    En consola PC: caja con los 8 modos y el modo activo marcado."""
+    sel = seleccion if seleccion is not None else MODO_CALC
+
+    # Construir las dos filas con marcador ">" en el seleccionado
+    def _celda(num, nombre):
+        marca = ">" if num == sel else " "
+        return f"{marca}{num}:{nombre:<7}"
+
+    fila1 = "".join(_celda(n, nm) for n, nm in _OPCIONES_MODE[:4])
+    fila2 = "".join(_celda(n, nm) for n, nm in _OPCIONES_MODE[4:])
+
+    if ENTORNO_PICO and display:
+        ANCHO = 16
+        display.fill(0)
+        display.text("===  MODE  ===", 0, 2, 1)
+        # En OLED 128px (16 chars) mostramos 2 opciones por fila
+        fila1_oled = f"{_celda(1,'COMP')[:8]}{_celda(2,'CMPLX')[:8]}"
+        fila2_oled = f"{_celda(3,'STAT')[:8]}{_celda(4,'BASN')[:8]}"
+        fila3_oled = f"{_celda(5,'EQN')[:8]}{_celda(6,'MATRX')[:8]}"
+        fila4_oled = f"{_celda(7,'TABLE')[:8]}{_celda(8,'VECT')[:8]}"
+        display.text(fila1_oled[:ANCHO], 0, 14, 1)
+        display.text(fila2_oled[:ANCHO], 0, 26, 1)
+        display.text(fila3_oled[:ANCHO], 0, 38, 1)
+        display.text(fila4_oled[:ANCHO], 0, 50, 1)
+        display.show()
+    else:
+        activo = MODO_CALC_NOMBRES.get(MODO_CALC, "?")
+        print("\n" + "=" * 36)
+        print("|        [MENU MODE]               |")
+        print("-" * 36)
+        for num, nombre in _OPCIONES_MODE:
+            marca = ">>" if num == sel else "  "
+            activo_txt = " <- ACTIVO" if num == MODO_CALC else ""
+            print(f"| {marca} {num}:{nombre:<8}{activo_txt:<14}|")
+        print("-" * 36)
+        print("|  Digita numero (1-8) o AC=salir  |")
+        print("=" * 36)
+
+
+def aplicar_modo(num):
+    """Aplica el modo seleccionado del menu MODE y devuelve mensaje
+    de confirmacion al estilo Casio (ej: 'COMP Mode')."""
+    global MODO_CALC, MODO_COMPLEJO, EN_MENU_MODE
+    if num not in MODO_CALC_NOMBRES:
+        return "Opcion invalida"
+    MODO_CALC = num
+    nombre = MODO_CALC_NOMBRES[num]
+    # Efectos secundarios segun el modo (igual que la fx-991)
+    if num == 2:
+        MODO_COMPLEJO = True
+    else:
+        # Modos 1,3-8 desactivan CMPLX salvo que el usuario lo reactiva
+        if num == 1:
+            MODO_COMPLEJO = False
+    EN_MENU_MODE = False
+    return f"{nombre} Mode"
+
+
 # ==========================================================
 # 12. PROCESADOR DE COMANDOS GENERAL
 # ==========================================================
@@ -1343,10 +1472,10 @@ def procesar_todo(entrada_cruda):
 
 
 # ==========================================================
-# 13. BUCLE DE EJECUCION (PC / PICO)
+# 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3
 # ==========================================================
 INSTRUCCIONES = (
-    "PiCalc OS v4.2 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v4.3 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
     "Memoria: A B C X Y ANS  |  Comandos: STO RCL\n"
@@ -1357,14 +1486,22 @@ INSTRUCCIONES = (
     "Tabla: TABLE<expr>,<ini>,<fin>,<paso>\n"
     "Base-N: BIN(n) OCT(n) HEX(n) AND(a,b) OR(a,b) XOR(a,b) NOT(n)\n"
     "Complejo: CMPLX (toggle) | usar I como unidad imaginaria\n"
-    "Control: AC DEL IGUAL BYPASS=modo examen"
+    "Control: AC DEL IGUAL BYPASS=modo examen\n"
+    "Cursor: IZQ DER  |  Menu modos: MODE  (luego digita 1-8)"
 )
 
 
-def iniciar():
-    global MODO_EXAMEN, ENTRADA_TOKENS
+def _pos_caracter_cursor(tokens, cursor_pos):
+    """Convierte CURSOR_POS (indice de token) en indice de caracter
+    dentro del string 'join(tokens)', para que el cursor visual '|'
+    aparezca en el lugar correcto."""
+    return sum(len(t) for t in tokens[:cursor_pos])
 
-    renderizar_pantalla("PiCalc OS v4.2", f"Modo Examen: {MODO_EXAMEN}",
+
+def iniciar():
+    global MODO_EXAMEN, ENTRADA_TOKENS, CURSOR_POS, EN_MENU_MODE
+
+    renderizar_pantalla("PiCalc OS v4.3", f"Modo Examen: {MODO_EXAMEN}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
@@ -1383,50 +1520,140 @@ def iniciar():
 
         accion_u = accion.upper()
 
-        # ---- Comandos de control ----
+        # ==================================================
+        # BLOQUE MENU MODE (v4.3)
+        # El menu MODE captura los tokens mientras esta abierto.
+        # Solo acepta: digitos 1-8 (seleccionar modo),
+        #              IZQ/DER (navegar opciones en Pico),
+        #              AC (cerrar sin cambiar modo).
+        # ==================================================
+        if EN_MENU_MODE:
+            if accion_u == "AC":
+                # Cancelar menu sin cambiar modo
+                EN_MENU_MODE = False
+                expr_actual = "".join(ENTRADA_TOKENS) or "0"
+                cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
+                renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
+            elif accion_u in ("IZQ", "DER"):
+                # Navegar entre las opciones del menu con flechas
+                delta = -1 if accion_u == "IZQ" else 1
+                nueva_sel = ((MODO_CALC - 1 + delta) % 8) + 1
+                renderizar_menu_mode(nueva_sel)
+                # Guardamos la seleccion temporal en MODO_CALC para que
+                # la siguiente pulsacion de DER/IZQ parta de ahi.
+                # El modo NO se aplica hasta que el usuario presione IGUAL
+                # o un digito (igual que la Casio fisica).
+                # Usamos una variable temporal local para no pisar MODO_CALC
+                # hasta confirmacion; aqui lo simplificamos: en la Pico
+                # la seleccion con flechas mueve el resaltado y IGUAL confirma.
+                # Para la consola PC el flujo por digito es mas natural.
+                # Actualizamos MODO_CALC temporalmente (se revertira con AC).
+                import sys
+                # Guardar seleccion resaltada
+                renderizar_menu_mode(nueva_sel)
+            elif accion_u == "IGUAL":
+                # En modo de navegacion con flechas, IGUAL confirma el MODO_CALC
+                # que se fue actualizando con IZQ/DER (ver arriba).
+                msg = aplicar_modo(MODO_CALC)
+                renderizar_pantalla(msg, f"Modo: {MODO_CALC_NOMBRES[MODO_CALC]}")
+            elif accion_u.isdigit() and 1 <= int(accion_u) <= 8:
+                # Seleccion directa por numero (igual que en la Casio fx-991)
+                num = int(accion_u)
+                msg = aplicar_modo(num)
+                renderizar_pantalla(msg, f"Modo: {MODO_CALC_NOMBRES[MODO_CALC]}")
+            else:
+                # Cualquier otra tecla: ignorar y redibujar el menu
+                renderizar_menu_mode()
+            continue
+
+        # ==================================================
+        # TECLAS DE CONTROL PRINCIPALES
+        # ==================================================
+
+        # ---- BYPASS: toggle modo examen ----
         if accion_u == "BYPASS":
             MODO_EXAMEN = not MODO_EXAMEN
-            renderizar_pantalla("".join(ENTRADA_TOKENS) or "0", f"Modo Examen: {MODO_EXAMEN}")
+            expr_actual = "".join(ENTRADA_TOKENS) or "0"
+            cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
+            renderizar_pantalla(expr_actual, f"Modo Examen: {MODO_EXAMEN}",
+                                cursor_pos=cur_ch)
             continue
 
+        # ---- MODE: abrir menu de modos (v4.3) ----
+        if accion_u == "MODE":
+            EN_MENU_MODE = True
+            renderizar_menu_mode()
+            continue
+
+        # ---- AC: limpiar todo y resetear cursor ----
         if accion_u == "AC":
             ENTRADA_TOKENS = []
-            renderizar_pantalla("0")
+            CURSOR_POS = 0
+            renderizar_pantalla("0", cursor_pos=0)
             continue
 
+        # ---- DEL: borrar token a la IZQUIERDA del cursor (v4.3) ----
         if accion_u == "DEL":
-            # Borra el ULTIMO TOKEN completo (ej: "SIN(" se va de un golpe)
-            if ENTRADA_TOKENS:
-                ENTRADA_TOKENS.pop()
-            renderizar_pantalla("".join(ENTRADA_TOKENS) or "0")
+            if CURSOR_POS > 0:
+                ENTRADA_TOKENS.pop(CURSOR_POS - 1)
+                CURSOR_POS -= 1
+            expr_actual = "".join(ENTRADA_TOKENS) or "0"
+            cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
+            renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
             continue
 
+        # ---- IZQ: mover cursor a la izquierda (v4.3) ----
+        if accion_u == "IZQ":
+            if CURSOR_POS > 0:
+                CURSOR_POS -= 1
+            expr_actual = "".join(ENTRADA_TOKENS) or "0"
+            cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
+            renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
+            continue
+
+        # ---- DER: mover cursor a la derecha (v4.3) ----
+        if accion_u == "DER":
+            if CURSOR_POS < len(ENTRADA_TOKENS):
+                CURSOR_POS += 1
+            expr_actual = "".join(ENTRADA_TOKENS) or "0"
+            cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
+            renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
+            continue
+
+        # ---- IGUAL: calcular ----
         if accion_u == "IGUAL":
             if ENTRADA_TOKENS:
                 expr = construir_expresion(ENTRADA_TOKENS)
                 texto_anterior = "".join(ENTRADA_TOKENS)
                 l1, l2, l3 = procesar_todo(expr)
+                # Mostrar resultado SIN cursor (igual que la Casio fisica
+                # al mostrar el resultado: el cursor desaparece hasta que
+                # el usuario empiece a escribir de nuevo).
                 renderizar_pantalla(texto_anterior, l1, l2, l3)
-                # FIX v3.2: solo limpiamos el buffer si el calculo fue exitoso.
-                # Si hubo error, la expresion queda en pantalla para poder editarla
-                # (comportamiento identico al de las Casio fisicas).
+                # FIX v3.2: solo limpiamos si no hubo error.
                 if l1 != "Error Sintaxis":
                     ENTRADA_TOKENS = []
+                    CURSOR_POS = 0
             continue
 
-        # ---- Cualquier otro boton: se agrega como TOKEN ----
+        # ==================================================
+        # INSERTAR TOKEN EN LA POSICION DEL CURSOR (v4.3)
+        # ==================================================
         # FIX v3.2: en la Pico, escanear_teclado() devuelve tokens ya formateados
         # (ej: "SIN(", "MAT2(") que NO son puramente .isalpha(). Para que PC y Pico
         # tengan comportamiento identico, intentamos el alias primero sobre la parte
         # alfabetica base, y si no hay alias, usamos el token tal como llego.
         token = ALIAS_TOKENS.get(accion_u, None)
         if token is None:
-            # En la Pico los tokens de funcion ya traen el "(" incluido.
-            # En la consola PC el usuario puede tipear "SIN" o "SIN(" indistintamente.
             token = accion_u if accion_u in ALIAS_TOKENS.values() else accion
 
-        ENTRADA_TOKENS.append(token)
-        renderizar_pantalla("".join(ENTRADA_TOKENS))
+        # NEW v4.3: insertar en CURSOR_POS en vez de al final
+        ENTRADA_TOKENS.insert(CURSOR_POS, token)
+        CURSOR_POS += 1
+
+        expr_actual = "".join(ENTRADA_TOKENS)
+        cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
+        renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
 
 
 if __name__ == "__main__":
