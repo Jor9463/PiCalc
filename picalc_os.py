@@ -2,25 +2,23 @@ import time
 import math
 
 # ==========================================================
-# PiCalc OS v3.1  –  Changelog desde v3.0
+# PiCalc OS v3.2  –  Changelog desde v3.1
 # ----------------------------------------------------------
-# FIX 1 (Hardware / GPIO): escanear_teclado() ahora inicializa
-#   las filas como IN (alta impedancia) y las conmuta a OUT/HIGH
-#   solo durante el escaneo de esa fila. Evita el cortocircuito
-#   OUT-HIGH vs OUT-LOW que quema GPIO cuando dos teclas de la
-#   misma columna se presionan simultaneamente.
+# FIX 1 (DERIV / INT): el separador de argumentos cambia de ";"
+#   a "," para que sea tipeble en el teclado fisico (la coma
+#   esta en fila 3 col 6; el punto y coma no existe en el layout).
+#   Nueva sintaxis:  DERIVSIN(X),2   |   INTX^2,0,1
 #
-# FIX 2 (SOLVE parser): resolver_ecuacion_lineal() ya no usa
-#   .replace("=", "-(") + ")" (que rompia parentesis internos,
-#   ej. SIN(X)=0.5 se transformaba en SIN(X-(0.5)). Ahora busca
-#   el indice exacto del "=" y construye lhs-(rhs) de forma segura.
+# FIX 2 (MCD / MCM con variables): los argumentos ahora pasan
+#   por evaluar_expresion() antes de convertirse a int, de modo
+#   que MCD(A,B) o MCM(X,12) leen correctamente la memoria.
 #
-# FIX 3 (Init GPIO): los pines de fila se crean como IN desde el
-#   arranque (en vez de OUT-LOW) para coherencia con el esquema
-#   de alta impedancia en reposo.
-#
-# NOTA: calcular_integral() (Regla de Simpson, 100 intervalos)
-#   ya estaba completa y correcta en v3.0 - se conserva sin cambios.
+# FIX 3 (comportamiento Casio al presionar IGUAL):
+#   - Si el resultado es "Error Sintaxis", ENTRADA_TOKENS NO se
+#     borra: la expresion queda en pantalla para poder editarla.
+#   - El routing de tokens en iniciar() ya no depende de .isalpha();
+#     ahora reconoce tokens pre-formateados del teclado fisico
+#     como "SIN(" o "MAT2(" que contienen "(" y no son pure-alpha.
 # ==========================================================
 
 # ==========================================================
@@ -806,19 +804,32 @@ def procesar_todo(entrada_cruda):
         if "MAT2" in cmd or "MAT3" in cmd or "DOT" in cmd or "CROSS" in cmd:
             return resolver_sistema_matrices(cmd)
         if "DERIV" in cmd:
-            partes = cmd.split("DERIV")[-1].split(";")
+            # FIX v3.2: separador "," en vez de ";" (la coma SI existe en el
+            # teclado fisico; el punto y coma no tiene tecla asignada).
+            # Uso en placa: DERIV <funcion> , <punto>  ej: DERIVSIN(X),2
+            partes = cmd.split("DERIV")[-1].split(",")
             return calcular_derivada(partes[0], partes[1]), "", ""
         if "INT" in cmd:
-            partes = cmd.split("INT")[-1].split(";")
-            return calcular_integral(partes[0], partes[1]), "", ""
+            # FIX v3.2: idem. Uso: INT<funcion>,<lim_inf>,<lim_sup>
+            # calcular_integral espera limites_str="lim_inf,lim_sup", por eso
+            # reconstruimos las dos partes de limite uniendo partes[1] y [2].
+            partes = cmd.split("INT")[-1].split(",")
+            limites = f"{partes[1]},{partes[2]}" if len(partes) >= 3 else partes[1]
+            return calcular_integral(partes[0], limites), "", ""
         if "PRIMOS" in cmd:
             return f"Fact: {factorizar_primos(cmd.split('PRIMOS')[-1])}", "", ""
         if "MCD" in cmd:
+            # FIX v3.2: evaluar argumentos antes de convertir a int, para que
+            # MCD(A,B) o MCD(X,12) funcionen usando las variables de memoria.
             p = cmd.split("MCD")[-1].split(",")
-            return f"MCD = {mcd(int(float(p[0])), int(float(p[1])))}", "", ""
+            val1 = int(evaluar_expresion(p[0].strip("() "), variables_actuales()))
+            val2 = int(evaluar_expresion(p[1].strip("() "), variables_actuales()))
+            return f"MCD = {mcd(val1, val2)}", "", ""
         if "MCM" in cmd:
             p = cmd.split("MCM")[-1].split(",")
-            return f"MCM = {mcm(int(float(p[0])), int(float(p[1])))}", "", ""
+            val1 = int(evaluar_expresion(p[0].strip("() "), variables_actuales()))
+            val2 = int(evaluar_expresion(p[1].strip("() "), variables_actuales()))
+            return f"MCM = {mcm(val1, val2)}", "", ""
 
         # ---- CONVERSIONES POLARES / RECTANGULARES ----
         if "POL" in cmd:  # POL(r, deg) -> X, Y
@@ -850,11 +861,14 @@ def procesar_todo(entrada_cruda):
 # 13. BUCLE DE EJECUCION (PC / PICO)
 # ==========================================================
 INSTRUCCIONES = (
-    "PiCalc OS v3.0 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v3.2 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
     "Memoria: A B C X Y ANS   |   Comandos: STO RCL\n"
     "Avanzado: SOLVE DERIV INT STAT MAT2 MAT3 DOT CROSS POL REC PRIMOS MCD MCM RAND\n"
+    "  DERIV<expr>,<punto>  ej: DERIVSIN(X),2\n"
+    "  INT<expr>,<a>,<b>   ej: INTX^2,0,1\n"
+    "  MCD<a>,<b> / MCM<a>,<b> admiten variables de memoria (A,B,C,X,Y)\n"
     "Control: AC=borra todo | DEL=borra ultimo token | IGUAL=calcular | BYPASS=modo examen"
 )
 
@@ -862,7 +876,7 @@ INSTRUCCIONES = (
 def iniciar():
     global MODO_EXAMEN, ENTRADA_TOKENS
 
-    renderizar_pantalla("PiCalc OS v3.0", f"Modo Examen: {MODO_EXAMEN}",
+    renderizar_pantalla("PiCalc OS v3.2", f"Modo Examen: {MODO_EXAMEN}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
@@ -905,16 +919,23 @@ def iniciar():
                 texto_anterior = "".join(ENTRADA_TOKENS)
                 l1, l2, l3 = procesar_todo(expr)
                 renderizar_pantalla(texto_anterior, l1, l2, l3)
-                # Limpia el buffer: la proxima expresion arranca en blanco
-                # y puede encadenar el resultado mediante ANS.
-                ENTRADA_TOKENS = []
+                # FIX v3.2: solo limpiamos el buffer si el calculo fue exitoso.
+                # Si hubo error, la expresion queda en pantalla para poder editarla
+                # (comportamiento identico al de las Casio fisicas).
+                if l1 != "Error Sintaxis":
+                    ENTRADA_TOKENS = []
             continue
 
         # ---- Cualquier otro boton: se agrega como TOKEN ----
-        if accion_u.isalpha():
-            token = ALIAS_TOKENS.get(accion_u, accion_u)
-        else:
-            token = accion  # numeros, ".", operadores, parentesis, ",", "="
+        # FIX v3.2: en la Pico, escanear_teclado() devuelve tokens ya formateados
+        # (ej: "SIN(", "MAT2(") que NO son puramente .isalpha(). Para que PC y Pico
+        # tengan comportamiento identico, intentamos el alias primero sobre la parte
+        # alfabetica base, y si no hay alias, usamos el token tal como llego.
+        token = ALIAS_TOKENS.get(accion_u, None)
+        if token is None:
+            # En la Pico los tokens de funcion ya traen el "(" incluido.
+            # En la consola PC el usuario puede tipear "SIN" o "SIN(" indistintamente.
+            token = accion_u if accion_u in ALIAS_TOKENS.values() else accion
 
         ENTRADA_TOKENS.append(token)
         renderizar_pantalla("".join(ENTRADA_TOKENS))
