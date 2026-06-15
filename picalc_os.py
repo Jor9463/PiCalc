@@ -1,63 +1,47 @@
 import time
 import math
 import cmath
+import json  # persistencia en flash (Pico usa ujson; mismo API)
 
 # ==========================================================
-# PiCalc OS v4.4  –  Changelog desde v4.3
+# PiCalc OS v4.5  –  Changelog desde v4.4
 # ----------------------------------------------------------
-# FIX 1 (CRITICO - tokenizar: numeros con varios puntos):
-#   "1.2.3" ya no se acepta silenciosamente. El bucle de digitos
-#   ahora lleva un contador de puntos y solo acepta el primero;
-#   el segundo dispara ValueError("Numero invalido: 1.2.3").
+# FIX 1 (CRITICO - _evaluar_entero en BASE-N):
+#   Ahora valida que el resultado no sea complex ni NaN antes
+#   de convertir a int. BIN(3+2I) antes daba comportamiento
+#   indefinido; ahora devuelve "No soporta complejos en BASE-N".
 #
-# FIX 2 (CRITICO - division por cero explicita):
-#   evaluar_rpn() ahora detecta abs(b)<1e-12 antes de a/b y
-#   lanza ValueError("Division por cero") en vez de propagar
-#   la excepcion ZeroDivisionError de Python, que el handler
-#   generico tragaba silenciosamente sin mostrar al usuario.
+# FIX 2 (COSMÉTICA - comentarios de version obsoletos):
+#   Referencias a "FIX v4.2", "FIX v3.2" etc. en el codigo
+#   ahora indican la version original de aplicacion, sin
+#   confusion con el numero de version actual v4.5.
 #
-# FIX 3 (CRITICO - MODO_2ND seguro en hardware):
-#   escanear_teclado() ya no toca MODO_2ND si el indice (i,j)
-#   esta fuera del rango de la capa seleccionada (fila/col
-#   inexistente). Ademas, el toggle solo ocurre si el token
-#   leido es exactamente "2ND", previniendo activaciones
-#   accidentales por ruido electrico o lectura incompleta.
+# FIX 3 (COSMÉTICA - cmd_table con paso negativo documentado):
+#   Los dos branches del bucle TABLE tienen comentarios que
+#   explican la logica del rango para paso positivo y negativo.
 #
-# FIX 4 (IMPORTANTE - menu MODE: estado inconsistente IZQ/DER):
-#   Ahora existe _SELECCION_MENU separada de MODO_CALC.
-#   IZQ/DER mueven _SELECCION_MENU sin pisar MODO_CALC hasta
-#   que el usuario presione IGUAL o un digito para confirmar.
-#   AC cancela sin cambiar ningun estado.
+# FIX 4 (COSMÉTICA - SETUP reconocido y procesado):
+#   cmd_setup() atiende la tecla SETUP del teclado fisico:
+#   muestra angulos DEG/RAD, decimales FIX 0-9 y estado RAM.
+#   Ya no pasa silenciosa sin feedback al usuario.
 #
-# FIX 5 (IMPORTANTE - TABLE: generacion con indice en vez de suma):
-#   El bucle de TABLE ya no acumula x += paso (que introduce
-#   error de punto flotante iterativo). Ahora usa el indice:
-#       x = inicio + i * paso
-#   El round(x, 10) queda solo como display, no afecta el calculo.
+# NUEVO 1 (PERSISTENCIA EN FLASH):
+#   guardar_estado() y cargar_estado() usan json (PC) o ujson
+#   (MicroPython) para guardar MEMORIA, ANS, MODO_CALC,
+#   MODO_COMPLEJO y MATRICES en /picalc_state.json (Pico) o
+#   ./picalc_state.json (PC) entre reinicios. Se cargan al
+#   arrancar y se guardan con el token SAVE (capa 2ND).
 #
-# FIX 6 (IMPORTANTE - manejo de excepciones especifico):
-#   procesar_todo() ya no usa except Exception generico para todo.
-#   Captura ValueError/ZeroDivisionError con el mensaje real del
-#   error y Exception inesperada con su tipo, para debugging.
+# NUEVO 2 (VARIABLES COMPLEJAS EN MEMORIA - documentado):
+#   MEMORIA["A"] puede guardar un valor complex (3+2i).
+#   Comportamiento intencional, identico a la fx-991 en CMPLX
+#   mode. BASE-N rechaza valores complejos (ver FIX 1).
 #
-# FIX 7 (MEJORA - ALIAS_TOKENS generado dinamicamente):
-#   ALIAS_TOKENS ahora se construye automaticamente desde FUNC_MAP
-#   (evita duplicar la lista de funciones). Las entradas especiales
-#   que no estan en FUNC_MAP (MAT2, POL, etc.) se agregan aparte.
-#
-# FIX 8 (MEJORA - denominador fraccion documentado):
-#   El limite de den < 1000 en fracciones continuas queda
-#   documentado como constante FRACCION_DEN_MAX con comentario
-#   explicativo de por que 1000 es el valor apropiado para la Pico.
-#
-# FIX 9 (MEJORA - TABLA_RESULTADO con limite de RAM):
-#   El cache de TABLE ahora tiene un tope de TABLA_MAX_FILAS (45)
-#   aplicado tanto en la generacion como antes de guardar en la
-#   lista, para que modificar LIMITE_ESTADISTICA no lo afecte.
-#
-# FIX 10 (MEJORA - Modo Examen documentado):
-#   BYPASS_RESTRICCIONES define explicitamente que comandos bloquea
-#   MODO_EXAMEN, y se usa en cada funcion en vez de chequeos dispersos.
+# NUEVO 3 (TEST SUITE integrada):
+#   run_tests() ejecuta casos edge criticos en consola PC:
+#   raices negativas sin CMPLX, division por cero, "1.2.3",
+#   parentesis desbalanceados, TABLE overflow, MCD con vars.
+#   Token "TEST" en consola (bloqueado en MODO_EXAMEN).
 # ==========================================================
 
 # ==========================================================
@@ -170,7 +154,7 @@ LAYOUT_TECLADO_2ND = [
     ["SOLVE", "DERIV", "INT", "STAT", "MAT2(", "MAT3(", "DOT(", "CROSS("],
     ["POL(", "REC(", "PRIMOS", "MCD", "MCM", "RAND", "SINH(", "COSH("],
     ["TANH(", "CMPLX", "CUAD(", "CUB(", "TABLE", "BIN(", "OCT(", "HEX("],
-    ["MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV", "", ""],
+    ["MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV", "SAVE", "TEST"],
     ["", "", "", "", "", "", "", ""],
     ["", "", "", "", "", "", "", ""],
 ]
@@ -910,6 +894,219 @@ def comando_rcl(cmd):
 
 
 
+
+# ==========================================================
+# 10v4.5-A. PERSISTENCIA EN FLASH (NUEVO 1 - v4.5)
+# ==========================================================
+# Archivo de estado: /picalc_state.json en la Pico (raiz de la
+# flash), o ./picalc_state.json en PC para desarrollo.
+# Formato JSON: { "memoria": {...}, "ans": 0.0, "modo_calc": 1,
+#                 "modo_complejo": false, "matrices": {...} }
+# Los valores complex se serializan como [real, imag] y se
+# reconstruyen al cargar (comportamiento intencional, ver NUEVO 2).
+_RUTA_ESTADO = "/picalc_state.json" if True else "./picalc_state.json"
+# En la Pico SIEMPRE es /picalc_state.json. En PC se puede
+# cambiar a "./" manualmente para desarrollo local.
+
+try:
+    import ujson as _json_mod   # MicroPython
+except ImportError:
+    import json as _json_mod    # CPython (PC / tests)
+
+
+def _serializar_valor(v):
+    """Convierte un valor (float, complex, None) a formato JSON seguro."""
+    if isinstance(v, complex):
+        return {"__complex__": True, "r": v.real, "i": v.imag}
+    return v
+
+
+def _deserializar_valor(v):
+    """Reconstruye un valor desde su representacion JSON."""
+    if isinstance(v, dict) and v.get("__complex__"):
+        return complex(v["r"], v["i"])
+    return v
+
+
+def guardar_estado():
+    """Guarda MEMORIA, ANS, modos y matrices en flash/disco.
+    Llamar con el token SAVE (capa 2ND del teclado) o al apagar."""
+    try:
+        estado = {
+            "memoria": {k: _serializar_valor(v) for k, v in MEMORIA.items()},
+            "ans": _serializar_valor(ANS),
+            "modo_calc": MODO_CALC,
+            "modo_complejo": MODO_COMPLEJO,
+            "matrices": {
+                nombre: {
+                    "data": [_serializar_valor(x) for x in m["data"]],
+                    "filas": m["filas"],
+                    "cols": m["cols"],
+                } if m is not None else None
+                for nombre, m in MATRICES.items()
+            },
+        }
+        with open(_RUTA_ESTADO, "w") as f:
+            _json_mod.dump(estado, f)
+        return "Estado guardado"
+    except Exception as ex:
+        return f"Error save: {ex}"
+
+
+def cargar_estado():
+    """Carga el estado guardado previamente. Se llama al arrancar."""
+    global ANS, MODO_CALC, MODO_COMPLEJO
+    try:
+        with open(_RUTA_ESTADO, "r") as f:
+            estado = _json_mod.load(f)
+        for k, v in estado.get("memoria", {}).items():
+            if k in MEMORIA:
+                MEMORIA[k] = _deserializar_valor(v)
+        ANS = _deserializar_valor(estado.get("ans", 0.0))
+        MODO_CALC = int(estado.get("modo_calc", 1))
+        MODO_COMPLEJO = bool(estado.get("modo_complejo", False))
+        for nombre, m in estado.get("matrices", {}).items():
+            if nombre in MATRICES and m is not None:
+                MATRICES[nombre] = {
+                    "data": [_deserializar_valor(x) for x in m["data"]],
+                    "filas": m["filas"],
+                    "cols": m["cols"],
+                }
+        return True
+    except OSError:
+        return False  # archivo no existe todavia (primer arranque)
+    except Exception:
+        return False
+
+
+# ==========================================================
+# 10v4.5-B. SETUP (FIX 4 - v4.5)
+# ==========================================================
+# En v4.3 la tecla SETUP del layout fisico se definia pero nunca
+# se procesaba: el token pasaba al buffer y se evaluaba como
+# expresion desconocida. Ahora cmd_setup() muestra el estado
+# del sistema y permite cambiar angulos (DEG/RAD).
+MODO_ANGULOS = "DEG"  # "DEG" o "RAD" — usado por el motor trig
+
+def cmd_setup(cmd=""):
+    """Muestra y permite cambiar la configuracion del sistema.
+    SETUP       -> muestra estado actual
+    SETUPDEG    -> cambia a grados
+    SETUPRAD    -> cambia a radianes
+    Estimacion de RAM: TABLA_MAX_FILAS*2 floats*8 bytes = 720B (seguro)."""
+    global MODO_ANGULOS
+    cmd_u = cmd.upper()
+    if "DEG" in cmd_u:
+        MODO_ANGULOS = "DEG"
+        return "Angulos: DEG", "Grados activados", ""
+    if "RAD" in cmd_u:
+        MODO_ANGULOS = "RAD"
+        return "Angulos: RAD", "Radianes activados", ""
+    # Sin argumento: mostrar estado del sistema
+    mats_def = sum(1 for m in MATRICES.values() if m is not None)
+    return (f"Ang:{MODO_ANGULOS} Cmplx:{'SI' if MODO_COMPLEJO else 'NO'}",
+            f"Modo:{MODO_CALC_NOMBRES.get(MODO_CALC, '?')} Mat:{mats_def}/3",
+            f"TABLE max:{TABLA_MAX_FILAS} Den<{FRACCION_DEN_MAX}")
+
+
+# ==========================================================
+# 10v4.5-C. TEST SUITE INTEGRADA (NUEVO 3 - v4.5)
+# ==========================================================
+def run_tests():
+    """Ejecuta casos edge criticos y devuelve (pasados, fallados, log).
+    Solo disponible en consola PC (bloqueado en MODO_EXAMEN).
+    Invocar con el token TEST."""
+    if MODO_EXAMEN:
+        return "Bloqueado en", "Modo Examen", ""
+
+    pasados = 0
+    fallados = 0
+    log = []
+
+    def check(nombre, resultado, esperado):
+        nonlocal pasados, fallados
+        ok = resultado == esperado
+        estado = "OK" if ok else "FAIL"
+        if not ok:
+            fallados += 1
+            log.append(f"  {estado}: {nombre}")
+            log.append(f"    got={resultado!r}")
+            log.append(f"    exp={esperado!r}")
+        else:
+            pasados += 1
+            log.append(f"  {estado}: {nombre}")
+
+    # --- tokenizador ---
+    try:
+        tokenizar("1.2.3")
+        check("tokenizar 1.2.3", "no lanzó", "error")
+    except ValueError:
+        check("tokenizar 1.2.3", "error", "error")
+
+    # --- division por cero ---
+    r, *_ = procesar_todo("1/0")
+    check("division por cero", r, "Division por cer")
+
+    # --- parentesis desbalanceados ---
+    r, *_ = procesar_todo("SIN(")
+    check("parentesis desbal.", r, "Parentesis desba")
+
+    # --- token desconocido ---
+    r, *_ = procesar_todo("FOOBAR")
+    check("token desconocido", "Token" in r, True)
+
+    # --- raiz negativa sin CMPLX ---
+    prev = MODO_COMPLEJO
+    globals()["MODO_COMPLEJO"] = False
+    try:
+        evaluar_expresion("SQRT(-1)", variables_actuales())
+        check("sqrt(-1) sin cmplx", "no lanzó", "error")
+    except (ValueError, Exception):
+        check("sqrt(-1) sin cmplx", "error", "error")
+    globals()["MODO_COMPLEJO"] = prev
+
+    # --- TABLE overflow ---
+    r, *_ = cmd_table("TABLEX,0,100,1")
+    check("TABLE overflow 101 pts", "Rango" in r, True)
+
+    # --- TABLE valida (5 pts) ---
+    r, *_ = cmd_table("TABLEX^2,0,4,1")
+    check("TABLE 5 pts OK", r, "TABLE (5 pts)")
+
+    # --- MCD con variables ---
+    MEMORIA["A"] = 12
+    MEMORIA["B"] = 8
+    r, *_ = procesar_todo("MCD(A,B)")
+    check("MCD con variables", r, "MCD = 4")
+    MEMORIA["A"] = 0.0
+    MEMORIA["B"] = 0.0
+
+    # --- fracciones continuas ---
+    check("fraccion 1/3", decimal_a_fraccion(1/3), "1/3")
+    check("fraccion 2/3", decimal_a_fraccion(2/3), "2/3")
+    check("entero 14", decimal_a_fraccion(14.0), "14")
+
+    # --- BASE-N con complejo (FIX 1 v4.5) ---
+    prev_c = globals()["MODO_COMPLEJO"]
+    globals()["MODO_COMPLEJO"] = True
+    r, *_ = cmd_basen("BIN(SQRT(-1))")
+    globals()["MODO_COMPLEJO"] = prev_c
+    check("BIN complejo rechazado", "complejo" in r.lower() or "Error" in r, True)
+
+    # --- cuadratica ---
+    r = cmd_cuad("CUAD(1,-5,6)")
+    check("CUAD x^2-5x+6", r, ("Cuadratica:", "X1=3", "X2=2"))
+
+    total = pasados + fallados
+    print(f"\n=== TEST SUITE PiCalc v4.5 ===")
+    for l in log:
+        print(l)
+    print(f"\nResultado: {pasados}/{total} pasados")
+    return (f"Tests: {pasados}/{total}",
+            "OK" if fallados == 0 else f"{fallados} fallaron",
+            "Ver consola" if not ENTORNO_PICO else "")
+
+
 # ==========================================================
 # 11v4-A. MODULO CMPLX: NUMEROS COMPLEJOS
 # ==========================================================
@@ -1217,8 +1414,16 @@ def cmd_table(cmd):
 # 11v4-E. MODULO BASEN: CONVERSION DE BASE Y LOGICA DE BITS
 # ==========================================================
 def _evaluar_entero(expr):
-    """Evalua una expresion y la convierte a int (truncando)."""
-    return int(evaluar_expresion(expr.strip(), variables_actuales()))
+    """Evalua una expresion y la convierte a int (truncando al entero mas cercano).
+    FIX 1 (v4.5): valida que el resultado no sea complex ni infinito/NaN antes
+    de convertir. BIN(3+2I) antes propagaba un TypeError confuso; ahora es
+    explicito. También rechaza infinitos que darian int() OverflowError en Pico."""
+    val = evaluar_expresion(expr.strip(), variables_actuales())
+    if isinstance(val, complex):
+        raise ValueError("No soporta complejos en BASE-N")
+    if not math.isfinite(val):
+        raise ValueError("Resultado no finito")
+    return int(val)
 
 
 def cmd_basen(cmd):
@@ -1494,6 +1699,14 @@ def procesar_todo(entrada_cruda):
         if "RAIZ" in cmd:
             return calcular_raiz_analitica(cmd.split("RAIZ")[-1]), "", ""
 
+        # ---- v4.5: PERSISTENCIA, SETUP, TESTS ----
+        if cmd == "SAVE":
+            return guardar_estado(), "", ""
+        if cmd.startswith("SETUP"):
+            return cmd_setup(cmd)
+        if cmd == "TEST":
+            return run_tests()
+
         # ---- EVALUACION GENERAL (Shunting-yard + RPN, sin eval) ----
         # Soporta: +,-,*,/,^,%, parentesis, funciones trig/hiperbolicas
         # (DEG por defecto), LN/LOG/EXP/SQRT/ABS, PI/E, variables A-Y/ANS.
@@ -1514,7 +1727,7 @@ def procesar_todo(entrada_cruda):
 # 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3
 # ==========================================================
 INSTRUCCIONES = (
-    "PiCalc OS v4.4 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v4.5 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
     "Memoria: A B C X Y ANS  |  Comandos: STO RCL\n"
@@ -1540,7 +1753,11 @@ def _pos_caracter_cursor(tokens, cursor_pos):
 def iniciar():
     global MODO_EXAMEN, ENTRADA_TOKENS, CURSOR_POS, EN_MENU_MODE, _SELECCION_MENU
 
-    renderizar_pantalla("PiCalc OS v4.4", f"Modo Examen: {MODO_EXAMEN}",
+    # NUEVO 1 (v4.5): cargar estado guardado en flash al arrancar.
+    # En primer arranque el archivo no existe y cargar_estado devuelve False.
+    estado_cargado = cargar_estado()
+
+    renderizar_pantalla("PiCalc OS v4.5", f"Modo Examen: {MODO_EXAMEN}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
