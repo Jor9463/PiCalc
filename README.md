@@ -107,4 +107,10 @@ El firmware ha evolucionado a través de dos grandes etapas: la etapa de **Simul
 1. Descargá el archivo de la última versión estable (ubicado en `src/picalc_os_v4_3.py`).
 2. Ejecutalo desde tu terminal favorita usando Python 3:
    ```bash
-   python src/picalc_os_v4_3.py
+  python src/picalc_os_v4_3.py
+3. Interactuá directamente tipeando los comandos. Podés tipear MODE para cambiar el estado global, usar las palabras clave de los alias para meter funciones y probar la velocidad del parser RPN.
+### En Hardware Real (Raspberry Pi Pico)
+1. Flasheá el firmware oficial de MicroPython en tu Raspberry Pi Pico.
+2. Conectá el módulo OLED SH1106 a los pines I2C definidos en el script (SDA: GPIO 4, SCL: GPIO 5).
+3. Cableá tu matriz de botones a los pines GPIO de Filas y Columnas configurados en la sección de hardware.
+4. Cargá el script dentro de la memoria flash de la placa usando Thonny IDE y renombralo estrictamente como main.py para que se ejecute en bucle infinito de forma automática al recibir energía.
