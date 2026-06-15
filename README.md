@@ -89,7 +89,7 @@ El firmware ha evolucionado a través de dos grandes etapas: la etapa de **Simul
     * **Módulo Complejo (CMPLX):** Integración nativa del módulo `cmath` de MicroPython cuando se activa el flag complejo. Entrada mediante el token de unidad imaginaria `i` (mapeado a `1j`) y formateo estricto de salida sin paréntesis tipo Python (ej: muestra `2+3i`, `-i`, `4-2i`).
     * **Módulo de Matrices (MAT):** Creación de almacenamiento persistente para `MatA`, `MatB` y `MatC` (hasta 4x4). Implementación de operaciones analíticas: multiplicación matricial con validación previa de dimensiones (`Error Dimension`), transposición, determinantes y matrices inversas.
     * **Filtro Anticolgaduras en Tablas (TABLE):** Se fijó un límite absoluto de 45 filas máximas en el modo tabla de valores. El sistema estima por software la cantidad de pasos calculados *antes* de iniciar las iteraciones matemáticas para evitar la congelación de la pantalla o el desborde de memoria RAM.
-* **picalc_os_v4.3 (La Versión Actual - Interfaz Gráfica Dinámica):**
+* **picalc_os_v4.3 (Interfaz Gráfica Dinámica):**
     * **Navegación por Cursor Real:** `ENTRADA_TOKENS` pasa de ser una lista estática a un buffer direccionable mediante un índice de cursor (`CURSOR_POS`). Las flechas de dirección mueven el cursor de forma fluida. Las inserciones de tokens y la acción de borrado (`DEL` actuando como backspace) se realizan exactamente en la posición del cursor (`|`).
     * **Scroll Horizontal Centrado:** El método de renderizado gráfico calcula dinámicamente la posición del cursor en caracteres y centra la vista de la pantalla OLED alrededor del cursor en lugar de fijar el extremo derecho.
     * **Menú MODE Fx-991 ClassWiz:** Al presionar la tecla `MODE`, la interfaz despliega el menú de cuadrícula icónico de la gama ClassWiz:
@@ -109,7 +109,12 @@ El firmware ha evolucionado a través de dos grandes etapas: la etapa de **Simul
     * **CONTROL DE TIPOS EN BASE-N:** Parche de estabilidad en `_evaluar_entero()`. Ahora se valida estrictamente que la pila RPN no intente convertir números complejos (`complex`) o indeterminaciones (`NaN`) a enteros. Expresiones inválidas como `BIN(3+2i)` ahora devuelven un error controlado: `"No soporta complejos en BASE-N"`.
     * **DOCUMENTACIÓN INTERNA Y PASO NEGATIVO:** Limpieza y actualización cosmética de comentarios obsoletos heredados de versiones previas. Se documentó detalladamente la lógica de bifurcación en el rango del comando `TABLE` cuando se trabaja con un incremento o paso negativo.
     * 
-
+* **picalc_os_v5.0 (Combinatoria, Avanzado en CMPLX y Formateo SCI/NORM):**
+    * **MÓDULO DE COMBINATORIA (`FACT`, `NPR`, `NCR`):** Inclusión de funciones de conteo y probabilidad en la capa de teclado `2ND`. `FACT(n)` calcula el factorial de enteros no negativos (límite de `n=170` para evitar overflow). `NPR(n,r)` y `NCR(n,r)` calculas permutaciones y combinaciones validando estrictamente que `0 <= r <= n`.
+    * **FUNCIONES COMPLEJAS AVANZADAS:** Integración de comandos `CONJ()` y `ARG()`. `CONJ` calcula el conjugado aritmético de un complejo ($a - bi$) y `ARG` extrae su argumento o ángulo de fase en el plano complejo, adaptándose de forma dinámica al formato de ángulos seleccionado.
+    * **CORRECCIÓN CRÍTICA EN ÁNGULOS (RADIANES REALES):** Se solucionó un bug heredado de la v4.5 donde el flag `MODO_ANGULOS = "RAD"` se guardaba en la Flash pero era ignorado por el motor de evaluación. Ahora, las funciones `SIN/COS/TAN` y sus inversas procesan e interpretan los radianes de forma directa y nativa sin forzar conversiones a grados.
+    * **FORMATOS DE PANTALLA CIENTÍFICOS (`SCI` y `NORM`):** Evolución del menú `SETUP`. Se añade soporte completo para visualización en notación científica (`SCI` con selección de 0 a 9 dígitos significativos) y regreso a formato decimal estándar (`NORM 1` y `NORM 2`), emulando perfectamente las restricciones visuales de la Casio física.
+    * 
 ---
 
 ## 🚀 Cómo Empezar / Instalación
