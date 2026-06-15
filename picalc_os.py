@@ -116,4 +116,172 @@ def resolver_ecuacion_lineal(eq_str):
         try:
             f_x = eval(eq.replace("X", f"({x})"))
             f_xh = eval(eq.replace("X", f"({x+h})"))
-            derivada = (f_
+            derivada = (f_xh - f_x) / h
+            if abs(derivada) < 1e-12: break
+            nuevo_x = x - (f_x / derivada)
+            if abs(nuevo_x - x) < 1e-6:
+                return f"X = {int(nuevo_x)}" if nuevo_x.is_integer() else f"X = {nuevo_x:.5f}"
+            x = nuevo_x
+        except: break
+    return "Sin Solución Real"
+
+def resolver_sistema_matrices(datos_str):
+    """
+    Resuelve sistemas o dibuja matrices. 
+    Formato entrada: MAT2X2[a,b,c,d] -> Calcula Determinante
+    """
+    if MODO_EXAMEN: return "Error: No disp"
+    try:
+        # Extrae los números de los corchetes
+        nums = [float(x) for x in datos_str.split("[")[-1].replace("]", "").split(",")]
+        if "2X2" in datos_str:
+            det = (nums[0]*nums[3]) - (nums[1]*nums[2])
+            return f"DET = {det}", f"[{nums[0]} {nums[1]}]", f"[{nums[2]} {nums[3]}]"
+    except: pass
+    return "Error Matriz", "", ""
+
+# ==========================================
+# 5. CÁLCULO INTEGRAL Y DIFERENCIAL NUMÉRICO
+# ==========================================
+def calcular_derivada(eq, punto_str):
+    if MODO_EXAMEN: return "Error: No disp"
+    try:
+        x = float(punto_str)
+        h = 1e-5
+        f_xh1 = eval(eq.replace("X", f"({x+h})"))
+        f_xh2 = eval(eq.replace("X", f"({x-h})"))
+        return f"d/dx = {(f_xh1 - f_xh2) / (2*h):.5f}"
+    except: return "Error"
+
+def calcular_integral(eq, limites_str):
+    """Integral definida usando la Regla de Simpson (100 intervalos)."""
+    if MODO_EXAMEN: return "Error: No disp"
+    try:
+        lim_inf, lim_sup = map(float, limites_str.split(","))
+        n = 100
+        h = (lim_sup - lim_inf) / n
+        suma = eval(eq.replace("X", f"({lim_inf})")) + eval(eq.replace("X", f"({lim_sup})"))
+        
+        for i in range(1, n):
+            x = lim_inf + i * h
+            peso = 4 if i % 2 != 0 else 2
+            suma += peso * eval(eq.replace("X", f"({x})"))
+        return f"INT = {(suma * h / 3):.5f}"
+    except: return "Error"
+
+# ==========================================
+# 6. ESTADÍSTICA BASADA EN LISTAS
+# ==========================================
+def procesar_estadistica(comando):
+    """Maneja el ingreso de datos en lista y cálculos estadísticos."""
+    global ESTADISTICA_LISTA
+    try:
+        if "ADD:" in list(comando)[0:4] or "ADD:" in comando:
+            val = float(comando.split(":")[-1])
+            ESTADISTICA_LISTA.append(val)
+            return f"Lista: {ESTADISTICA_LISTA}", f"N = {len(ESTADISTICA_LISTA)}"
+        elif "CLEAR" in comando:
+            ESTADISTICA_LISTA = []
+            return "Lista Limpia", "N = 0"
+        elif "CALC" in comando:
+            if not ESTADISTICA_LISTA: return "Lista vacía", ""
+            n = len(ESTADISTICA_LISTA)
+            media = sum(ESTADISTICA_LISTA) / n
+            varianza = sum((x - media)**2 for x in ESTADISTICA_LISTA) / n
+            desviacion = varianza ** 0.5
+            return f"Media: {media:.4f}", f"StdDev: {desviacion:.4f}", f"N = {n}"
+    except: pass
+    return "Error Estad.", ""
+
+# ==========================================
+# 7. PROCESADOR DE COMANDOS GENERAL
+# ==========================================
+def procesar_todo(entrada_cruda):
+    cmd = entrada_cruda.upper().replace("MULT", "*").replace("DIV", "/").replace("MAS", "+").replace("MENOS", "-")
+    
+    try:
+        # ---- SECCIÓN ESTADÍSTICA ----
+        if "STAT" in cmd:
+            res = procesar_estadistica(cmd.split("STAT")[-1])
+            return res if isinstance(res, tuple) else (res, "", "")
+
+        # ---- SECCIÓN ÁLGEBRA Y CÁLCULO ----
+        if "SOLVE" in cmd:
+            return resolver_ecuacion_lineal(cmd.split("SOLVE")[-1]), "", ""
+        if "MAT" in cmd:
+            return resolver_sistema_matrices(cmd)
+        if "DERIV" in cmd:
+            partes = cmd.split("DERIV")[-1].split(";")
+            return calcular_derivada(partes[0], partes[1]), "", ""
+        if "INT" in cmd:
+            partes = cmd.split("INT")[-1].split(";")
+            return calcular_integral(partes[0], partes[1]), "", ""
+        if "PRIMOS" in cmd:
+            return f"Fact: {factorizar_primos(cmd.split('PRIMOS')[-1])}", "", ""
+        if "MCD" in cmd:
+            p = cmd.split("MCD")[-1].split(",")
+            return f"MCD = {mcd(int(p[0]), int(p[1]))}", "", ""
+        if "MCM" in cmd:
+            p = cmd.split("MCM")[-1].split(",")
+            return f"MCM = {mcm(int(p[0]), int(p[1]))}", "", ""
+
+        # ---- CONVERSIONES DE COORDENADAS Y ÁNGULOS ----
+        if "POL" in cmd: # Polar a Rectangular: POL(r, degh) -> X, Y
+            p = cmd.split("POL")[-1].replace("(","").replace(")","").split(",")
+            r, rad = float(p[0]), math.radians(float(p[1]))
+            return f"X = {r*math.cos(rad):.4f}", f"Y = {r*math.sin(rad):.4f}"
+        if "REC" in cmd: # Rectangular a Polar: REC(x, y) -> R, θ
+            p = cmd.split("REC")[-1].replace("(","").replace(")","").split(",")
+            x, y = float(p[0]), float(p[1])
+            return f"R = {math.hypot(x,y):.4f}", f"ANG = {math.degrees(math.atan2(y,x)):.2f}°"
+
+        # ---- TRIGONOMETRÍA, LOGARITMOS Y OTRAS ----
+        # Reemplazos dinámicos usando la librería math estándar
+        cmd = cmd.replace("SIN(", "math.sin(").replace("COS(", "math.cos(").replace("TAN(", "math.tan(")
+        cmd = cmd.replace("ASIN(", "math.asin(").replace("ACOS(", "math.acos(").replace("ATAN(", "math.atan(")
+        cmd = cmd.replace("SINH(", "math.sinh(").replace("COSH(", "math.cosh(").replace("TANH(", "math.tanh(")
+        cmd = cmd.replace("LN(", "math.log(").replace("LOG(", "math.log10(").replace("EXP(", "math.exp(")
+        cmd = cmd.replace("PI", str(math.pi)).replace("E", str(math.e))
+        
+        if "RAND" in cmd: return f"Rand: {time.time() % 1:.5f}", "", ""
+        if "RAIZ" in cmd: return calcular_raiz_analitica(cmd.split("RAIZ")[-1]), "", ""
+
+        # Evaluación aritmética lineal estándar
+        res_num = eval(cmd)
+        return decimal_a_fraccion(res_num), "", ""
+    except Exception as e:
+        return "Error Sintaxis", "", ""
+
+# ==========================================
+# 8. BUCLE DE EJECUCIÓN (PC / PICO)
+# ==========================================
+def iniciar():
+    global MODO_EXAMEN
+    entrada = ""
+    renderizar_pantalla("PiCalc ClassWiz v2", f"Modo Examen: {MODO_EXAMEN}", "Tipee comandos para", "comenzar el test.")
+    
+    while True:
+        if ENTORNO_PICO:
+            # Aquí iría el escaneo físico de matriz (ya estructurado en respuestas anteriores)
+            time.sleep(0.1)
+        else:
+            accion = input("\nIngrese botón/comando: ").strip()
+            if accion.upper() == "BYPASS":
+                MODO_EXAMEN = not MODO_EXAMEN
+                print(f"--> [SISTEMA] Modo Examen cambiado a: {MODO_EXAMEN}")
+                continue
+            elif accion.upper() == "AC":
+                entrada = ""
+                renderizar_pantalla("0")
+                continue
+            elif accion.upper() == "IGUAL":
+                if entrada:
+                    l1, l2, l3 = procesar_todo(entrada)
+                    renderizar_pantalla(entrada, l1, l2, l3)
+                continue
+            
+            entrada += accion
+            renderizar_pantalla(entrada)
+
+if __name__ == "__main__":
+    iniciar()
