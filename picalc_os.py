@@ -3,7 +3,7 @@ import math
 import cmath  # numeros complejos (disponible en MicroPython)
 
 # ==========================================================
-# PiCalc OS v4.1  –  Changelog desde v4.0
+# PiCalc OS v4.2  –  Changelog desde v4.1
 # ----------------------------------------------------------
 # FIX 1 (TABLE): limite de 45 filas maximas (igual que Casio
 #   fx-991). El chequeo ocurre ANTES de iterar con un calculo
@@ -19,6 +19,30 @@ import cmath  # numeros complejos (disponible en MicroPython)
 #   bucle (cols(A) == filas(B)). Antes un mismatch lanzaba
 #   IndexError interno; ahora devuelve "Error Dimension" con
 #   los valores exactos para que el usuario sepa que corregir.
+#
+# FIX 4 (v4.2 - Formato numerico): decimal_a_fraccion() para
+#   reales ya NO depende de MODO_EXAMEN para decidir si limpia
+#   los ".0" o intenta una fraccion. Antes, en Modo Examen
+#   (el modo por defecto), "2+3*4" mostraba "14.00000" en vez
+#   de "14". Ahora el chequeo de entero y la aproximacion a
+#   fraccion se aplican siempre; ".5f" queda solo como ultimo
+#   recurso para decimales que no son fracciones simples.
+#
+# FIX 5 (v4.2 - Fracciones por fraccion continua): el algoritmo
+#   anterior (val*100000, gcd con 100000) casi nunca encontraba
+#   fracciones simples por error de redondeo de punto flotante
+#   (ej: 1/3 = 0.3333333333 -> gcd(33333,100000)=1, nunca daba
+#   "1/3"). Ahora se usa el algoritmo de fracciones continuas,
+#   que SI reconstruye 1/3, 2/3, 1/7, 22/7, etc. con denominador
+#   menor a 1000.
+#
+# FIX 6 (v4.2 - Signo menos unario inicial): "-3^2" ahora da -9
+#   (convencion matematica estandar: -(3^2)), en vez de 9
+#   ((-3)^2) como en v4.1. Se distinguen dos tipos de menos
+#   unario en el Shunting-Yard: el "-" inicial de una expresion
+#   (ej: el de "-3^2") cede precedencia ante "^", mientras que
+#   el "-" que aparece justo despues de "^" (ej: "2^-2") conserva
+#   precedencia maxima para seguir dando 2^(-2) = 0.25.
 # ==========================================================
 
 # ==========================================================
@@ -246,12 +270,11 @@ def factorizar_primos(n):
 #
 # Variables reconocidas: A, B, C, X, Y (memoria) y ANS (ultimo resultado).
 #
-# NOTA / LIMITACION CONOCIDA:
-#   La precedencia del menos unario (NEG) se fijo por ENCIMA de "^" para
-#   que "2^-2" se resuelva como 2^(-2) = 0.25 (caso muy frecuente en
-#   exponentes negativos / notacion cientifica). Como contrapartida,
-#   "-2^2" se evalua como (-2)^2 = 4 en vez de -(2^2) = -4. Si se
-#   necesita ese caso, debe escribirse explicitamente "-(2^2)".
+# NOTA (v4.2):
+#   El menos unario ahora tiene dos comportamientos segun el contexto
+#   (ver FIX 6 arriba): "-3^2" = -(3^2) = -9 (convencion estandar) y
+#   "2^-2" = 2^(-2) = 0.25 (exponente negativo). Ambos casos frecuentes
+#   funcionan correctamente sin necesidad de parentesis adicionales.
 
 FUNC_MAP = {
     "SIN":  (math.sin,  "deg_in"),
@@ -273,8 +296,8 @@ FUNC_MAP = {
 
 CONSTANTES = {"PI": math.pi, "E": math.e, "I": 1j}  # I = unidad imaginaria
 
-PRECEDENCIA = {"+": 2, "-": 2, "*": 3, "/": 3, "%": 3, "^": 5, "NEG": 6}
-ASOC_DERECHA = ("^", "NEG")
+PRECEDENCIA = {"+": 2, "-": 2, "*": 3, "/": 3, "%": 3, "^": 5, "NEG": 6, "NEGL": 4}
+ASOC_DERECHA = ("^", "NEG", "NEGL")
 
 
 def tokenizar(expr):
@@ -355,10 +378,20 @@ def a_rpn(tokens):
                 while pila and pila[-1] != ("OP", "("):
                     salida.append(pila.pop())
             elif val == "-" and (prev is None or (prev[0] == "OP" and prev[1] != ")") or prev[0] == "FUNC"):
-                # Menos unario -> token especial NEG
-                while pila and pila[-1][0] == "OP" and pila[-1][1] != "(" and _debe_pop(pila[-1][1], "NEG"):
+                # Menos unario -> token especial NEG (o NEGL)
+                # FIX v4.2: distinguimos dos casos de menos unario mediante
+                # dos tokens de pila distintos, para que la comparacion de
+                # precedencias en _debe_pop funcione correctamente:
+                #  - NEG  (precedencia maxima): el "-" viene justo despues
+                #    de "^", ej "2^-2" = 2^(-2) = 0.25
+                #  - NEGL (precedencia baja, "Leading"): cualquier otro
+                #    menos unario, ej "-3^2" = -(3^2) = -9 (convencion
+                #    matematica estandar)
+                neg_tras_potencia = prev is not None and prev == ("OP", "^")
+                op_neg = "NEG" if neg_tras_potencia else "NEGL"
+                while pila and pila[-1][0] == "OP" and pila[-1][1] != "(" and _debe_pop(pila[-1][1], op_neg):
                     salida.append(pila.pop())
-                pila.append(("OP", "NEG"))
+                pila.append(("OP", op_neg))
             else:
                 op = val
                 while pila and pila[-1][0] == "OP" and pila[-1][1] != "(" and _debe_pop(pila[-1][1], op):
@@ -418,7 +451,7 @@ def evaluar_rpn(rpn, variables=None):
                     resultado = math.degrees(resultado)
             pila.append(resultado)
         elif tipo == "OP":
-            if val == "NEG":
+            if val in ("NEG", "NEGL"):
                 a = pila.pop()
                 pila.append(-a)
             else:
@@ -513,19 +546,46 @@ def decimal_a_fraccion(val):
         im_str = "i" if mag == 1 else _fmt_parte(mag) + "i"
         return f"{_fmt_parte(r)}{signo}{im_str}"
 
-    if MODO_EXAMEN:
-        return f"{val:.5f}"
+    # FIX v4.2: el chequeo de entero y la aproximacion a fraccion se aplican
+    # SIEMPRE, incluso en MODO_EXAMEN. Antes, en examen (modo por defecto),
+    # todo numero real pasaba directo a "{val:.5f}" sin filtrar los .0 ni
+    # intentar fraccion, por lo que 2+3*4 mostraba "14.00000" en vez de "14".
     try:
         val = round(val, 10)
         if isinstance(val, int) or val.is_integer():
             return str(int(val))
-        d_base = 100000
-        n_base = int(round(val * d_base))
-        a, b = abs(n_base), abs(d_base)
-        while b:
-            a, b = b, a % b
-        num, den = int(n_base / a), int(d_base / a)
-        return f"{num}/{den}" if den < 1000 else f"{val:.5f}"
+
+        # FIX v4.2: aproximacion por fracciones continuas.
+        # El metodo anterior (val*100000 / mcd con 100000) casi nunca
+        # encontraba fracciones simples: 1/3 = 0.3333333333 ->
+        # mcd(33333,100000)=1, asi que 1/3 nunca se reconstruia como
+        # "1/3". El algoritmo de fracciones continuas SI encuentra
+        # 1/3, 2/3, 1/7, 22/7, etc. con denominador < 1000.
+        signo = -1 if val < 0 else 1
+        x = abs(val)
+        h_prev, h_prev2 = 1, 0
+        k_prev, k_prev2 = 0, 1
+        resto = x
+        num, den = 0, 1
+        for _ in range(20):
+            entero = int(resto)
+            h_cur = entero * h_prev + h_prev2
+            k_cur = entero * k_prev + k_prev2
+            num, den = h_cur, k_cur
+            if den == 0 or den > 1000:
+                num, den = h_prev, k_prev
+                break
+            frac = resto - entero
+            if abs(x - num / den) < 1e-9:
+                break
+            if frac == 0:
+                break
+            resto = 1 / frac
+            h_prev2, h_prev = h_prev, h_cur
+            k_prev2, k_prev = k_prev, k_cur
+        if den != 0 and den < 1000 and abs(x - num / den) < 1e-9:
+            return f"{signo * num}/{den}"
+        return f"{val:.5f}"
     except Exception:
         return f"{val:.5f}"
 
@@ -1286,7 +1346,7 @@ def procesar_todo(entrada_cruda):
 # 13. BUCLE DE EJECUCION (PC / PICO)
 # ==========================================================
 INSTRUCCIONES = (
-    "PiCalc OS v4.0 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v4.2 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
     "Memoria: A B C X Y ANS  |  Comandos: STO RCL\n"
@@ -1304,7 +1364,7 @@ INSTRUCCIONES = (
 def iniciar():
     global MODO_EXAMEN, ENTRADA_TOKENS
 
-    renderizar_pantalla("PiCalc OS v4.1", f"Modo Examen: {MODO_EXAMEN}",
+    renderizar_pantalla("PiCalc OS v4.2", f"Modo Examen: {MODO_EXAMEN}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
