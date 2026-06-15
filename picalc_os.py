@@ -1,24 +1,33 @@
 import time
 import math
+import cmath  # numeros complejos (disponible en MicroPython)
 
 # ==========================================================
-# PiCalc OS v3.2  –  Changelog desde v3.1
+# PiCalc OS v4.0  –  Changelog desde v3.2
 # ----------------------------------------------------------
-# FIX 1 (DERIV / INT): el separador de argumentos cambia de ";"
-#   a "," para que sea tipeble en el teclado fisico (la coma
-#   esta en fila 3 col 6; el punto y coma no existe en el layout).
-#   Nueva sintaxis:  DERIVSIN(X),2   |   INTX^2,0,1
+# NUEVO 1 (CMPLX): modo numeros complejos activable con CMPLX.
+#   El motor RPN detecta el flag MODO_COMPLEJO y usa cmath en
+#   lugar de math para raices, trig y potencias. La unidad
+#   imaginaria se escribe "i" en la expresion (se traduce a 1j).
 #
-# FIX 2 (MCD / MCM con variables): los argumentos ahora pasan
-#   por evaluar_expresion() antes de convertirse a int, de modo
-#   que MCD(A,B) o MCM(X,12) leen correctamente la memoria.
+# NUEVO 2 (MAT): almacenamiento de matrices independientes
+#   MatA/MatB/MatC (hasta 4x4). Comandos: MATDEF, MATADD,
+#   MATMUL, MATTRANS, MATDET, MATINV. Las matrices se guardan
+#   en el diccionario MATRICES y persisten entre calculos.
 #
-# FIX 3 (comportamiento Casio al presionar IGUAL):
-#   - Si el resultado es "Error Sintaxis", ENTRADA_TOKENS NO se
-#     borra: la expresion queda en pantalla para poder editarla.
-#   - El routing de tokens en iniciar() ya no depende de .isalpha();
-#     ahora reconoce tokens pre-formateados del teclado fisico
-#     como "SIN(" o "MAT2(" que contienen "(" y no son pure-alpha.
+# NUEVO 3 (EQN): solucionador directo de polinomios.
+#   CUAD(a,b,c) -> formula cuadratica, devuelve X1 y X2 (reales
+#   o complejas si MODO_COMPLEJO activo).
+#   CUB(a,b,c,d) -> metodo de Cardano/depresion cubica.
+#
+# NUEVO 4 (TABLE): tabulacion de funciones.
+#   TABLE<expr>,<inicio>,<fin>,<paso>  ->  scroll en pantalla
+#   de pares (x, f(x)). Navegar con flechas (proxima version)
+#   o ver resultado completo en consola PC.
+#
+# NUEVO 5 (BASEN): conversion de base y logica de bits.
+#   BIN(n), OCT(n), HEX(n) muestran la representacion.
+#   Operadores AND, OR, XOR, NOT sobre enteros.
 # ==========================================================
 
 # ==========================================================
@@ -38,6 +47,15 @@ ANS = 0.0
 ESTADISTICA_LISTA = []
 ENTRADA_TOKENS = []
 LIMITE_ESTADISTICA = 50  # cuida la RAM de la Pico
+
+# ---- Estado v4.0 ----
+MODO_COMPLEJO = False   # False=real, True=CMPLX (raices negativas devuelven complex)
+MATRICES = {            # almacenamiento persistente de matrices (hasta 4x4)
+    "A": None,
+    "B": None,
+    "C": None,
+}
+TABLA_RESULTADO = []    # cache de la ultima TABLE generada para scroll futuro
 
 display = None
 if ENTORNO_PICO:
@@ -87,8 +105,8 @@ LAYOUT_TECLADO = [
 LAYOUT_TECLADO_2ND = [
     ["SOLVE", "DERIV", "INT", "STAT", "MAT2(", "MAT3(", "DOT(", "CROSS("],
     ["POL(", "REC(", "PRIMOS", "MCD", "MCM", "RAND", "SINH(", "COSH("],
-    ["TANH(", "", "", "", "", "", "", ""],
-    ["", "", "", "", "", "", "", ""],
+    ["TANH(", "CMPLX", "CUAD(", "CUB(", "TABLE", "BIN(", "OCT(", "HEX("],
+    ["MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV", "", ""],
     ["", "", "", "", "", "", "", ""],
     ["", "", "", "", "", "", "", ""],
 ]
@@ -262,7 +280,7 @@ FUNC_MAP = {
     "ABS":  (abs,        None),
 }
 
-CONSTANTES = {"PI": math.pi, "E": math.e}
+CONSTANTES = {"PI": math.pi, "E": math.e, "I": 1j}  # I = unidad imaginaria
 
 PRECEDENCIA = {"+": 2, "-": 2, "*": 3, "/": 3, "%": 3, "^": 5, "NEG": 6}
 ASOC_DERECHA = ("^", "NEG")
@@ -367,25 +385,46 @@ def a_rpn(tokens):
 
 
 def evaluar_rpn(rpn, variables=None):
-    """Evalua una lista de tokens en notacion RPN usando una pila."""
+    """Evalua una lista de tokens en notacion RPN usando una pila.
+    En MODO_COMPLEJO usa cmath para SQRT y funciones trigonometricas,
+    permitiendo resultados complejos (ej: SQRT(-1) = i)."""
     if variables is None:
         variables = {}
     pila = []
+
+    # Mapa de funciones cmath para MODO_COMPLEJO
+    FUNC_MAP_CMPLX = {
+        "SQRT": cmath.sqrt, "RAIZ": cmath.sqrt,
+        "LN":   cmath.log,  "LOG":  lambda x: cmath.log(x, 10),
+        "EXP":  cmath.exp,
+        "SIN":  cmath.sin,  "COS":  cmath.cos,  "TAN": cmath.tan,
+        "ASIN": cmath.asin, "ACOS": cmath.acos, "ATAN": cmath.atan,
+    }
+
     for (tipo, val) in rpn:
         if tipo == "NUM":
             pila.append(val)
         elif tipo == "VAR":
             if val not in variables:
                 raise ValueError("Variable no definida: " + val)
-            pila.append(float(variables[val]))
+            pila.append(variables[val])  # puede ser complex si MODO_COMPLEJO
         elif tipo == "FUNC":
             arg = pila.pop()
-            fn, modo = FUNC_MAP[val]
-            if modo == "deg_in":
-                arg = math.radians(arg)
-            resultado = fn(arg)
-            if modo == "deg_out":
-                resultado = math.degrees(resultado)
+            if MODO_COMPLEJO and val in FUNC_MAP_CMPLX:
+                fn = FUNC_MAP_CMPLX[val]
+                # grados -> radianes para trig en modo complejo
+                if FUNC_MAP[val][1] == "deg_in":
+                    arg = cmath.pi * arg / 180
+                resultado = fn(arg)
+                if FUNC_MAP[val][1] == "deg_out":
+                    resultado = cmath.phase(resultado) * 180 / cmath.pi
+            else:
+                fn, modo = FUNC_MAP[val]
+                if modo == "deg_in":
+                    arg = math.radians(arg)
+                resultado = fn(arg)
+                if modo == "deg_out":
+                    resultado = math.degrees(resultado)
             pila.append(resultado)
         elif tipo == "OP":
             if val == "NEG":
@@ -458,10 +497,23 @@ def calcular_raiz_analitica(valor_str):
 
 
 def decimal_a_fraccion(val):
+    # Numeros complejos: formatear como "a+bi" o "bi"
+    if isinstance(val, complex):
+        r, im = val.real, val.imag
+        r = round(r, 8)
+        im = round(im, 8)
+        r_s = (str(int(r)) if r == int(r) else f"{r:.5f}") if r != 0 else ""
+        im_s = ("i" if abs(im) == 1 else f"{abs(im):.5f}i" if abs(im) != int(abs(im))
+                else f"{int(abs(im))}i")
+        if r == 0 and im == 0:
+            return "0"
+        if r == 0:
+            return f"{'-' if im < 0 else ''}{im_s}"
+        return f"{r_s}{'+' if im > 0 else '-'}{im_s}"
     if MODO_EXAMEN:
         return f"{val:.5f}"
     try:
-        val = round(val, 10)  # tolerancia: evita ASIN(0.5) -> "30/1" en vez de "30"
+        val = round(val, 10)
         if isinstance(val, int) or val.is_integer():
             return str(int(val))
         d_base = 100000
@@ -718,6 +770,339 @@ def comando_rcl(cmd):
     return f"{var} = {decimal_a_fraccion(MEMORIA[var])}"
 
 
+
+# ==========================================================
+# 11v4-A. MODULO CMPLX: NUMEROS COMPLEJOS
+# ==========================================================
+def toggle_cmplx():
+    """Activa/desactiva el modo numeros complejos."""
+    global MODO_COMPLEJO
+    MODO_COMPLEJO = not MODO_COMPLEJO
+    return f"Modo CMPLX: {'ON' if MODO_COMPLEJO else 'OFF'}"
+
+
+# ==========================================================
+# 11v4-B. MODULO MAT: MATRICES INDEPENDIENTES (hasta 4x4)
+# ==========================================================
+def _fmt_mat(m, filas, cols):
+    """Formatea una matriz plana para la pantalla OLED (multi-linea)."""
+    lineas = []
+    for f in range(filas):
+        fila = [f"{m[f * cols + c]:.3f}" for c in range(cols)]
+        lineas.append(" ".join(fila))
+    return lineas
+
+
+def cmd_matdef(cmd):
+    """MATDEF<nombre>,<filas>,<cols>,<v1>,<v2>,...
+    Guarda la matriz en MATRICES['nombre'].
+    Ejemplo: MATDEFA,2,2,1,2,3,4  ->  MatA = [[1,2],[3,4]]"""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        resto = cmd.split("MATDEF", 1)[-1].strip()
+        partes = resto.split(",")
+        nombre = partes[0].upper()
+        if nombre not in MATRICES:
+            return "Nombre: A B C", "", ""
+        filas, cols = int(partes[1]), int(partes[2])
+        if filas > 4 or cols > 4:
+            return "Max 4x4", "", ""
+        vals = [evaluar_expresion(v, variables_actuales()) for v in partes[3:]]
+        if len(vals) != filas * cols:
+            return "Num valores!=", f"{filas}x{cols}", ""
+        MATRICES[nombre] = {"data": vals, "filas": filas, "cols": cols}
+        lineas = _fmt_mat(vals, filas, cols)
+        return f"Mat{nombre} OK {filas}x{cols}", lineas[0] if lineas else "", lineas[1] if len(lineas) > 1 else ""
+    except Exception as ex:
+        return f"Error Mat: {ex}", "", ""
+
+
+def _get_mat(nombre):
+    m = MATRICES.get(nombre)
+    if m is None:
+        raise ValueError(f"Mat{nombre} no definida")
+    return m
+
+
+def cmd_matadd(cmd):
+    """MATADD<A>,<B> -> MatA + MatB, resultado en lineas de pantalla."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        partes = cmd.split("MATADD", 1)[-1].strip().split(",")
+        a, b = _get_mat(partes[0].upper()), _get_mat(partes[1].upper())
+        if a["filas"] != b["filas"] or a["cols"] != b["cols"]:
+            return "Dims distintas", "", ""
+        res = [x + y for x, y in zip(a["data"], b["data"])]
+        lineas = _fmt_mat(res, a["filas"], a["cols"])
+        return lineas[0], lineas[1] if len(lineas) > 1 else "", lineas[2] if len(lineas) > 2 else ""
+    except Exception as ex:
+        return f"Error: {ex}", "", ""
+
+
+def cmd_matmul(cmd):
+    """MATMUL<A>,<B> -> MatA x MatB (producto matricial)."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        partes = cmd.split("MATMUL", 1)[-1].strip().split(",")
+        a, b = _get_mat(partes[0].upper()), _get_mat(partes[1].upper())
+        fa, ca, fb, cb = a["filas"], a["cols"], b["filas"], b["cols"]
+        if ca != fb:
+            return f"Dims: {fa}x{ca}", f"!= {fb}x{cb}", ""
+        res = []
+        for i in range(fa):
+            for j in range(cb):
+                s = sum(a["data"][i * ca + k] * b["data"][k * cb + j] for k in range(ca))
+                res.append(s)
+        lineas = _fmt_mat(res, fa, cb)
+        return lineas[0], lineas[1] if len(lineas) > 1 else "", lineas[2] if len(lineas) > 2 else ""
+    except Exception as ex:
+        return f"Error: {ex}", "", ""
+
+
+def cmd_mattrans(cmd):
+    """MATTRANS<A> -> transpuesta de MatA."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        nombre = cmd.split("MATTRANS", 1)[-1].strip().upper()
+        m = _get_mat(nombre)
+        f, c = m["filas"], m["cols"]
+        res = [m["data"][i * c + j] for j in range(c) for i in range(f)]
+        lineas = _fmt_mat(res, c, f)
+        return lineas[0], lineas[1] if len(lineas) > 1 else "", ""
+    except Exception as ex:
+        return f"Error: {ex}", "", ""
+
+
+def cmd_matdet(cmd):
+    """MATDET<A> -> determinante de MatA (solo 2x2 y 3x3)."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        nombre = cmd.split("MATDET", 1)[-1].strip().upper()
+        m = _get_mat(nombre)
+        d = m["data"]
+        if m["filas"] == 2 and m["cols"] == 2:
+            return f"det = {decimal_a_fraccion(det2(d))}", "", ""
+        if m["filas"] == 3 and m["cols"] == 3:
+            return f"det = {decimal_a_fraccion(det3(d))}", "", ""
+        return "Solo 2x2 o 3x3", "", ""
+    except Exception as ex:
+        return f"Error: {ex}", "", ""
+
+
+def _inv2(d):
+    """Inversa de matriz 2x2 (lista plana de 4 elementos)."""
+    det = det2(d)
+    if abs(det) < 1e-12:
+        raise ValueError("Singular")
+    return [d[3] / det, -d[1] / det, -d[2] / det, d[0] / det]
+
+
+def _inv3(d):
+    """Inversa de matriz 3x3 por adjugada / det."""
+    det = det3(d)
+    if abs(det) < 1e-12:
+        raise ValueError("Singular")
+    a, b, c, dd, e, f, g, h, ii = d
+    adj = [
+        (e * ii - f * h), -(b * ii - c * h), (b * f - c * e),
+        -(dd * ii - f * g), (a * ii - c * g), -(a * f - c * dd),
+        (dd * h - e * g), -(a * h - b * g), (a * e - b * dd),
+    ]
+    return [v / det for v in adj]
+
+
+def cmd_matinv(cmd):
+    """MATINV<A> -> inversa de MatA (2x2 o 3x3)."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        nombre = cmd.split("MATINV", 1)[-1].strip().upper()
+        m = _get_mat(nombre)
+        d = m["data"]
+        if m["filas"] == 2 and m["cols"] == 2:
+            res = _inv2(d)
+            lineas = _fmt_mat(res, 2, 2)
+        elif m["filas"] == 3 and m["cols"] == 3:
+            res = _inv3(d)
+            lineas = _fmt_mat(res, 3, 3)
+        else:
+            return "Solo 2x2 o 3x3", "", ""
+        return lineas[0], lineas[1] if len(lineas) > 1 else "", lineas[2] if len(lineas) > 2 else ""
+    except Exception as ex:
+        return f"Error: {ex}", "", ""
+
+
+# ==========================================================
+# 11v4-C. MODULO EQN: ECUACIONES CUADRATICAS Y CUBICAS
+# ==========================================================
+def _fmt_raiz(v):
+    """Formatea una raiz real o compleja de forma compacta."""
+    if isinstance(v, complex):
+        return decimal_a_fraccion(v)
+    v = round(v, 8)
+    return str(int(v)) if v == int(v) else f"{v:.5f}"
+
+
+def cmd_cuad(cmd):
+    """CUAD(a,b,c) -> resuelve ax^2 + bx + c = 0 (formula cuadratica).
+    Devuelve X1 y X2; si MODO_COMPLEJO=True acepta discriminante negativo."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        partes = cmd.split("CUAD", 1)[-1].strip().strip("()")
+        p = [evaluar_expresion(v.strip(), variables_actuales()) for v in partes.split(",")]
+        a, b, c = p[0], p[1], p[2]
+        if abs(a) < 1e-12:
+            return "a no puede=0", "Usar SOLVE", ""
+        disc = b * b - 4 * a * c
+        if disc < 0 and not MODO_COMPLEJO:
+            return f"disc={disc:.4f}<0", "Activar CMPLX", "para raices i"
+        if MODO_COMPLEJO:
+            disc_r = cmath.sqrt(complex(disc))
+        else:
+            disc_r = math.sqrt(disc)
+        x1 = (-b + disc_r) / (2 * a)
+        x2 = (-b - disc_r) / (2 * a)
+        return "Cuadratica:", f"X1={_fmt_raiz(x1)}", f"X2={_fmt_raiz(x2)}"
+    except Exception as ex:
+        return f"Error: {ex}", "", ""
+
+
+def cmd_cub(cmd):
+    """CUB(a,b,c,d) -> resuelve ax^3 + bx^2 + cx + d = 0
+    Metodo: depresion cubica + formula de Cardano.
+    Devuelve las 3 raices (reales o complejas segun MODO_COMPLEJO)."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        partes = cmd.split("CUB", 1)[-1].strip().strip("()")
+        p = [evaluar_expresion(v.strip(), variables_actuales()) for v in partes.split(",")]
+        a, b, c, d = p[0], p[1], p[2], p[3]
+        if abs(a) < 1e-12:
+            return "a no puede=0", "Usar CUAD/SOLVE", ""
+        # Normalizar: x^3 + px + q (depresion cubica: sustituir x = t - b/3a)
+        b /= a; c /= a; d /= a
+        p_c = c - b * b / 3
+        q_c = 2 * b * b * b / 27 - b * c / 3 + d
+        disc = (q_c / 2) ** 2 + (p_c / 3) ** 3
+
+        if MODO_COMPLEJO or disc >= 0:
+            sqD = cmath.sqrt(complex(disc)) if MODO_COMPLEJO else math.sqrt(max(disc, 0))
+            u = (-q_c / 2 + sqD)
+            v = (-q_c / 2 - sqD)
+            u = (u ** (1 / 3)) if u >= 0 else -((-u) ** (1 / 3))
+            v = (v ** (1 / 3)) if v >= 0 else -((-v) ** (1 / 3))
+            raices = [u + v - b / 3]
+            # Las otras dos raices son complejas conjugadas cuando disc > 0
+            w = complex(-0.5, 3 ** 0.5 / 2)
+            raices.append(w * u + w.conjugate() * v - b / 3)
+            raices.append(w.conjugate() * u + w * v - b / 3)
+        else:
+            # Tres raices reales: caso cissoid (usar angulo)
+            r = 2 * math.sqrt(-p_c / 3)
+            theta = math.acos(3 * q_c / (p_c * r)) / 3
+            raices = [
+                r * math.cos(theta) - b / 3,
+                r * math.cos(theta - 2 * math.pi / 3) - b / 3,
+                r * math.cos(theta - 4 * math.pi / 3) - b / 3,
+            ]
+
+        return (f"X1={_fmt_raiz(raices[0])}",
+                f"X2={_fmt_raiz(raices[1])}",
+                f"X3={_fmt_raiz(raices[2])}")
+    except Exception as ex:
+        return f"Error: {ex}", "", ""
+
+
+# ==========================================================
+# 11v4-D. MODULO TABLE: TABULACION DE FUNCIONES
+# ==========================================================
+def cmd_table(cmd):
+    """TABLE<expr>,<inicio>,<fin>,<paso>
+    Genera la tabla f(x) para x en [inicio, fin] con paso dado.
+    En consola PC muestra la tabla completa.
+    En Pico muestra la primera fila; el resto queda en TABLA_RESULTADO para scroll."""
+    global TABLA_RESULTADO
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        resto = cmd.split("TABLE", 1)[-1].strip()
+        partes = resto.split(",")
+        eq_u = partes[0].upper()
+        inicio = evaluar_expresion(partes[1], variables_actuales())
+        fin    = evaluar_expresion(partes[2], variables_actuales())
+        paso   = evaluar_expresion(partes[3], variables_actuales())
+        if paso == 0 or (fin - inicio) / paso > 200:
+            return "Paso invalido", "max 200 filas", ""
+
+        TABLA_RESULTADO = []
+        x = inicio
+        while (paso > 0 and x <= fin + 1e-9) or (paso < 0 and x >= fin - 1e-9):
+            fx = evaluar_expresion(eq_u, variables_actuales({"X": x}))
+            TABLA_RESULTADO.append((round(x, 6), round(fx, 6) if not isinstance(fx, complex) else fx))
+            x += paso
+            x = round(x, 10)  # evita acumulacion de error flotante
+
+        if not TABLA_RESULTADO:
+            return "Tabla vacia", "", ""
+
+        # Mostrar primera fila en OLED; resto queda en cache
+        x0, fx0 = TABLA_RESULTADO[0]
+        return (f"TABLE ({len(TABLA_RESULTADO)} pts)",
+                f"x={x0} f={decimal_a_fraccion(fx0)}",
+                "DEL=ver sig." if len(TABLA_RESULTADO) > 1 else "")
+    except Exception as ex:
+        return f"Error Table: {ex}", "", ""
+
+
+# ==========================================================
+# 11v4-E. MODULO BASEN: CONVERSION DE BASE Y LOGICA DE BITS
+# ==========================================================
+def _evaluar_entero(expr):
+    """Evalua una expresion y la convierte a int (truncando)."""
+    return int(evaluar_expresion(expr.strip(), variables_actuales()))
+
+
+def cmd_basen(cmd):
+    """BIN(n), OCT(n), HEX(n) -> convierte n a la base indicada.
+    AND(a,b), OR(a,b), XOR(a,b), NOT(n) -> logica de bits (32 bits)."""
+    try:
+        u = cmd.upper()
+        if u.startswith("BIN"):
+            n = _evaluar_entero(u[3:].strip("() "))
+            return f"BIN: {bin(n)}", f"(={n})", ""
+        if u.startswith("OCT"):
+            n = _evaluar_entero(u[3:].strip("() "))
+            return f"OCT: {oct(n)}", f"(={n})", ""
+        if u.startswith("HEX"):
+            n = _evaluar_entero(u[3:].strip("() "))
+            return f"HEX: {hex(n).upper()}", f"(={n})", ""
+        if u.startswith("AND"):
+            p = u[3:].strip("() ").split(",")
+            a, b = _evaluar_entero(p[0]), _evaluar_entero(p[1])
+            return f"{a} AND {b}", f"= {a & b}", f"HEX: {hex(a & b).upper()}"
+        if u.startswith("OR"):
+            p = u[2:].strip("() ").split(",")
+            a, b = _evaluar_entero(p[0]), _evaluar_entero(p[1])
+            return f"{a} OR {b}", f"= {a | b}", f"HEX: {hex(a | b).upper()}"
+        if u.startswith("XOR"):
+            p = u[3:].strip("() ").split(",")
+            a, b = _evaluar_entero(p[0]), _evaluar_entero(p[1])
+            return f"{a} XOR {b}", f"= {a ^ b}", f"HEX: {hex(a ^ b).upper()}"
+        if u.startswith("NOT"):
+            n = _evaluar_entero(u[3:].strip("() "))
+            r = (~n) & 0xFFFFFFFF  # NOT de 32 bits sin signo
+            return f"NOT {n}", f"= {r}", f"HEX: {hex(r).upper()}"
+        return "Cmd BASE-N:", "BIN OCT HEX", "AND OR XOR NOT"
+    except Exception as ex:
+        return f"Error BASE-N: {ex}", "", ""
+
+
 # ==========================================================
 # 11. CAPA DE ENTRADA: TOKENS Y MULTIPLICACION IMPLICITA
 # ==========================================================
@@ -734,6 +1119,9 @@ ALIAS_TOKENS = {
     "SQRT": "SQRT(", "RAIZ": "RAIZ(", "ABS": "ABS(",
     "MAT2": "MAT2(", "MAT3": "MAT3(", "DOT": "DOT(", "CROSS": "CROSS(",
     "POL": "POL(", "REC": "REC(",
+    # v4.0
+    "CUAD": "CUAD(", "CUB": "CUB(",
+    "BIN": "BIN(", "OCT": "OCT(", "HEX": "HEX(",
 }
 
 
@@ -831,6 +1219,30 @@ def procesar_todo(entrada_cruda):
             val2 = int(evaluar_expresion(p[1].strip("() "), variables_actuales()))
             return f"MCM = {mcm(val1, val2)}", "", ""
 
+        # ---- v4.0: NUEVAS FUNCIONES ----
+        if "CMPLX" in cmd:
+            return toggle_cmplx(), f"MODO_CMPLX={'ON' if MODO_COMPLEJO else 'OFF'}", ""
+        if "CUAD" in cmd:
+            return cmd_cuad(cmd)
+        if "CUB" in cmd and "COSH" not in cmd and "CROSS" not in cmd:
+            return cmd_cub(cmd)
+        if "TABLE" in cmd:
+            return cmd_table(cmd)
+        if any(cmd.startswith(k) for k in ("BIN", "OCT", "HEX", "AND", "OR", "XOR", "NOT")):
+            return cmd_basen(cmd)
+        if "MATDEF" in cmd:
+            return cmd_matdef(cmd)
+        if "MATADD" in cmd:
+            return cmd_matadd(cmd)
+        if "MATMUL" in cmd:
+            return cmd_matmul(cmd)
+        if "MATTRANS" in cmd:
+            return cmd_mattrans(cmd)
+        if "MATDET" in cmd:
+            return cmd_matdet(cmd)
+        if "MATINV" in cmd:
+            return cmd_matinv(cmd)
+
         # ---- CONVERSIONES POLARES / RECTANGULARES ----
         if "POL" in cmd:  # POL(r, deg) -> X, Y
             nums = extraer_numeros(cmd, "POL")
@@ -861,22 +1273,25 @@ def procesar_todo(entrada_cruda):
 # 13. BUCLE DE EJECUCION (PC / PICO)
 # ==========================================================
 INSTRUCCIONES = (
-    "PiCalc OS v3.2 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v4.0 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
-    "Memoria: A B C X Y ANS   |   Comandos: STO RCL\n"
-    "Avanzado: SOLVE DERIV INT STAT MAT2 MAT3 DOT CROSS POL REC PRIMOS MCD MCM RAND\n"
-    "  DERIV<expr>,<punto>  ej: DERIVSIN(X),2\n"
-    "  INT<expr>,<a>,<b>   ej: INTX^2,0,1\n"
-    "  MCD<a>,<b> / MCM<a>,<b> admiten variables de memoria (A,B,C,X,Y)\n"
-    "Control: AC=borra todo | DEL=borra ultimo token | IGUAL=calcular | BYPASS=modo examen"
+    "Memoria: A B C X Y ANS  |  Comandos: STO RCL\n"
+    "Calculo: SOLVE DERIV<f>,<x>  INT<f>,<a>,<b>  MCD MCM RAND PRIMOS\n"
+    "Matrices (sistemas): MAT2 MAT3 DOT CROSS\n"
+    "Matrices (algebra): MATDEF<n>,<f>,<c>,vals  MATADD MATMUL MATTRANS MATDET MATINV\n"
+    "Polinomios: CUAD(a,b,c)  CUB(a,b,c,d)\n"
+    "Tabla: TABLE<expr>,<ini>,<fin>,<paso>\n"
+    "Base-N: BIN(n) OCT(n) HEX(n) AND(a,b) OR(a,b) XOR(a,b) NOT(n)\n"
+    "Complejo: CMPLX (toggle) | usar I como unidad imaginaria\n"
+    "Control: AC DEL IGUAL BYPASS=modo examen"
 )
 
 
 def iniciar():
     global MODO_EXAMEN, ENTRADA_TOKENS
 
-    renderizar_pantalla("PiCalc OS v3.2", f"Modo Examen: {MODO_EXAMEN}",
+    renderizar_pantalla("PiCalc OS v4.0", f"Modo Examen: {MODO_EXAMEN}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
