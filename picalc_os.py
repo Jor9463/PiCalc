@@ -4,7 +4,40 @@ import cmath
 import json  # persistencia en flash (Pico usa ujson; mismo API)
 
 # ==========================================================
-# PiCalc OS v4.5  –  Changelog desde v4.4
+# PiCalc OS v5.0  –  Changelog desde v4.5
+# ----------------------------------------------------------
+# NUEVO 1 (FACT/NPR/NCR - CRITICO):
+#   Se agregan FACT(n) (n!), NPR(n,r) (permutaciones) y
+#   NCR(n,r) (combinaciones) como funciones de teclado (capa 2ND).
+#   FACT acepta enteros no negativos hasta 170 (limite de float
+#   antes de overflow). NPR/NCR validan 0<=r<=n.
+#
+# NUEVO 2 (CONJ/ARG en CMPLX):
+#   CONJ(a+bi) devuelve el conjugado a-bi. ARG(a+bi) devuelve el
+#   angulo (en DEG o RAD segun MODO_ANGULOS) del numero complejo.
+#   Ambas solo tienen sentido con MODO_COMPLEJO activo; si se
+#   usan sobre un real, ARG da 0 y CONJ da el mismo numero.
+#
+# NUEVO 3 (SETUP completo: FIX/SCI/NORM + RAD real):
+#   - FIX 0 (V4.5 BUG): MODO_ANGULOS="RAD" se guardaba pero NUNCA
+#     se usaba en evaluar_rpn(), que siempre convertia grados<->rad
+#     sin importar el modo. Ahora SIN/COS/TAN/ASIN/ACOS/ATAN
+#     respetan MODO_ANGULOS=DEG/RAD (en RAD no se hace conversion).
+#   - SETUPFIX<n> fija decimales (FIX 0-9). SETUPSCI activa
+#     notacion cientifica. SETUPNORM vuelve al formato automatico
+#     (fracciones + 5 decimales, comportamiento v4.x). Estos
+#     formatos se aplican en decimal_a_fraccion() para numeros
+#     reales (no afectan fracciones exactas en NORM).
+#
+# NUEVO 4 (STAT con regresion lineal):
+#   STATX<x>,<y> agrega un par (x,y) a dos listas paralelas.
+#   STATCALC ahora, si hay datos pareados, ademas de N/Media/Var
+#   devuelve "a=...  b=..." (y=a+bx) y el coeficiente "r=...".
+#   STATCLEAR limpia ambas listas. El modo de 1 variable (ADD:v)
+#   sigue funcionando igual que en v4.5.
+# ==========================================================
+# ==========================================================
+# PiCalc OS v4.5  –  Changelog desde v4.4 (historico)
 # ----------------------------------------------------------
 # FIX 1 (CRITICO - _evaluar_entero en BASE-N):
 #   Ahora valida que el resultado no sea complex ni NaN antes
@@ -59,6 +92,10 @@ MODO_EXAMEN = True  # True = Modo bloqueado (Clase) | False = CAS / ClassWiz com
 MEMORIA = {"A": 0.0, "B": 0.0, "C": 0.0, "X": 0.0, "Y": 0.0}
 ANS = 0.0
 ESTADISTICA_LISTA = []
+# NUEVO 4 (v5.0): segunda lista paralela para datos pareados (x,y),
+# usada por STATX para regresion lineal. len() siempre igual a
+# ESTADISTICA_LISTA si hay datos pareados; vacia en modo 1-variable.
+ESTADISTICA_LISTA_Y = []
 ENTRADA_TOKENS = []
 CURSOR_POS = 0          # NEW v4.3: indice de insercion dentro de ENTRADA_TOKENS
 LIMITE_ESTADISTICA = 50  # cuida la RAM de la Pico
@@ -155,7 +192,9 @@ LAYOUT_TECLADO_2ND = [
     ["POL(", "REC(", "PRIMOS", "MCD", "MCM", "RAND", "SINH(", "COSH("],
     ["TANH(", "CMPLX", "CUAD(", "CUB(", "TABLE", "BIN(", "OCT(", "HEX("],
     ["MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV", "SAVE", "TEST"],
-    ["", "", "", "", "", "", "", ""],
+    # NUEVO (v5.0): FACT(n!), NPR/NCR (permutaciones/combinaciones),
+    # CONJ/ARG (numeros complejos), STATX (regresion lineal pareada).
+    ["FACT(", "NPR(", "NCR(", "CONJ(", "ARG(", "STATX", "STATCLEAR", ""],
     ["", "", "", "", "", "", "", ""],
 ]
 
@@ -308,6 +347,58 @@ def factorizar_primos(n):
 
 
 # ==========================================================
+# 4b. COMBINATORIA: FACT (n!), NPR (permutaciones), NCR (combinaciones)
+#     (NUEVO 1 - v5.0)
+# ==========================================================
+LIMITE_FACTORIAL = 170  # 170! < 1.8e308 (limite de un float64); 171! desborda
+
+
+def calcular_factorial(n):
+    """n! para entero 0 <= n <= LIMITE_FACTORIAL. Lanza ValueError si
+    n no es un entero no negativo o excede el limite (overflow de float)."""
+    if n < 0 or n != int(n):
+        raise ValueError("FACT: n debe ser entero >= 0")
+    n = int(n)
+    if n > LIMITE_FACTORIAL:
+        raise ValueError(f"FACT: n>{LIMITE_FACTORIAL} desborda")
+    resultado = 1
+    for i in range(2, n + 1):
+        resultado *= i
+    return float(resultado)
+
+
+def calcular_npr(n, r):
+    """Permutaciones: nPr = n! / (n-r)!  con 0 <= r <= n."""
+    if n < 0 or r < 0 or n != int(n) or r != int(r):
+        raise ValueError("NPR: n,r deben ser enteros >= 0")
+    n, r = int(n), int(r)
+    if r > n:
+        raise ValueError("NPR: requiere r<=n")
+    if n > LIMITE_FACTORIAL:
+        raise ValueError(f"NPR: n>{LIMITE_FACTORIAL} desborda")
+    resultado = 1
+    for i in range(n - r + 1, n + 1):
+        resultado *= i
+    return float(resultado)
+
+
+def calcular_ncr(n, r):
+    """Combinaciones: nCr = n! / (r! * (n-r)!)  con 0 <= r <= n.
+    Calculado de forma incremental para evitar factoriales grandes
+    cuando r es pequeno (ej: NCR(170,2) no necesita 170!)."""
+    if n < 0 or r < 0 or n != int(n) or r != int(r):
+        raise ValueError("NCR: n,r deben ser enteros >= 0")
+    n, r = int(n), int(r)
+    if r > n:
+        raise ValueError("NCR: requiere r<=n")
+    r = min(r, n - r)  # simetria: nCr = nC(n-r), usar el r mas chico
+    resultado = 1
+    for i in range(r):
+        resultado = resultado * (n - i) // (i + 1)
+    return float(resultado)
+
+
+# ==========================================================
 # 5. MOTOR DE EXPRESIONES (SHUNTING-YARD + RPN)
 # ==========================================================
 # Reemplaza por completo el uso de eval(). Convierte un string infijo
@@ -344,6 +435,13 @@ FUNC_MAP = {
     "SQRT": (math.sqrt,  None),
     "RAIZ": (math.sqrt,  None),
     "ABS":  (abs,        None),
+    # NUEVO 1 (v5.0): factorial. modo="fact" -> manejo especial en
+    # evaluar_rpn (valida entero >=0, usa calcular_factorial).
+    "FACT": (calcular_factorial, "fact"),
+    # NUEVO 2 (v5.0): CONJ y ARG para numeros complejos. modo="cplx_*"
+    # -> manejo especial en evaluar_rpn (funcionan en real Y complejo).
+    "CONJ": (lambda x: x, "cplx_conj"),
+    "ARG":  (lambda x: 0.0, "cplx_arg"),
 }
 
 CONSTANTES = {"PI": math.pi, "E": math.e, "I": 1j}  # I = unidad imaginaria
@@ -491,20 +589,53 @@ def evaluar_rpn(rpn, variables=None):
             pila.append(variables[val])  # puede ser complex si MODO_COMPLEJO
         elif tipo == "FUNC":
             arg = pila.pop()
+
+            # NUEVO 1 (v5.0): FACT - factorial, siempre real, valida entero.
+            if val == "FACT":
+                if isinstance(arg, complex):
+                    raise ValueError("FACT: no soporta complejos")
+                pila.append(calcular_factorial(arg))
+                continue
+
+            # NUEVO 2 (v5.0): CONJ y ARG - operan sobre real O complejo.
+            if val == "CONJ":
+                pila.append(arg.conjugate() if isinstance(arg, complex) else arg)
+                continue
+            if val == "ARG":
+                if isinstance(arg, complex):
+                    angulo_rad = cmath.phase(arg)
+                else:
+                    angulo_rad = 0.0 if arg >= 0 else math.pi
+                # FIX 0 (v5.0): respeta MODO_ANGULOS (ver mas abajo)
+                if MODO_ANGULOS == "DEG":
+                    pila.append(math.degrees(angulo_rad))
+                else:
+                    pila.append(angulo_rad)
+                continue
+
+            # FIX 0 (v5.0): MODO_ANGULOS="RAD" desactiva la conversion
+            # grados<->radianes para las funciones trigonometricas. En
+            # v4.5 esta conversion se aplicaba SIEMPRE sin importar
+            # MODO_ANGULOS, por lo que SETUPRAD no tenia ningun efecto
+            # sobre el motor matematico (solo se guardaba el estado).
+            usar_grados = (MODO_ANGULOS == "DEG")
+
             if MODO_COMPLEJO and val in FUNC_MAP_CMPLX:
                 fn = FUNC_MAP_CMPLX[val]
-                # grados -> radianes para trig en modo complejo
-                if FUNC_MAP[val][1] == "deg_in":
+                # grados -> radianes para trig en modo complejo (solo si DEG)
+                if FUNC_MAP[val][1] == "deg_in" and usar_grados:
                     arg = cmath.pi * arg / 180
                 resultado = fn(arg)
-                if FUNC_MAP[val][1] == "deg_out":
+                if FUNC_MAP[val][1] == "deg_out" and usar_grados:
                     resultado = cmath.phase(resultado) * 180 / cmath.pi
+                elif FUNC_MAP[val][1] == "deg_out":
+                    resultado = cmath.phase(resultado)
             else:
                 fn, modo = FUNC_MAP[val]
-                if modo == "deg_in":
+                if modo == "deg_in" and usar_grados:
                     arg = math.radians(arg)
                 resultado = fn(arg)
-                if modo == "deg_out":
+                if modo == "deg_out" and usar_grados:
                     resultado = math.degrees(resultado)
             pila.append(resultado)
         elif tipo == "OP":
@@ -605,6 +736,21 @@ def decimal_a_fraccion(val):
         mag = abs(im)
         im_str = "i" if mag == 1 else _fmt_parte(mag) + "i"
         return f"{_fmt_parte(r)}{signo}{im_str}"
+
+    # NUEVO 3 (v5.0): FIX/SCI fuerzan un formato fijo, salteando el
+    # chequeo de entero y la aproximacion a fraccion de NORM. Los
+    # complejos arriba NO se ven afectados (siempre usan el estilo
+    # Casio "a+bi"); FIX/SCI son solo para el camino "real" de abajo.
+    if FORMATO_NUM == "FIX":
+        try:
+            return f"{val:.{FORMATO_DECIMALES}f}"
+        except Exception:
+            return f"{val:.5f}"
+    if FORMATO_NUM == "SCI":
+        try:
+            return f"{val:.{FORMATO_DECIMALES}e}"
+        except Exception:
+            return f"{val:.5e}"
 
     # FIX v4.2: el chequeo de entero y la aproximacion a fraccion se aplican
     # SIEMPRE, incluso en MODO_EXAMEN. Antes, en examen (modo por defecto),
@@ -831,9 +977,30 @@ def calcular_integral(eq, limites_str):
 # 9. ESTADISTICA BASADA EN LISTAS (STAT)
 # ==========================================================
 def procesar_estadistica(comando):
-    """Maneja el ingreso de datos en lista y los calculos STATCALC."""
-    global ESTADISTICA_LISTA
+    """Maneja el ingreso de datos en lista y los calculos STATCALC.
+
+    NUEVO 4 (v5.0): comando "X<x>,<y>" agrega un par (x,y) a dos listas
+    paralelas (ESTADISTICA_LISTA / ESTADISTICA_LISTA_Y) para regresion
+    lineal. Si hay datos pareados, CALC ademas devuelve la pendiente
+    "a" y ordenada "b" de y=a+bx, y el coeficiente de correlacion "r".
+    "CLEAR" limpia ambas listas (1-variable y pareada)."""
+    global ESTADISTICA_LISTA, ESTADISTICA_LISTA_Y
     try:
+        # NUEVO 4 (v5.0): datos pareados "X<x>,<y>" -> regresion lineal
+        if comando.startswith("X") or comando.startswith(":X"):
+            if len(ESTADISTICA_LISTA) >= LIMITE_ESTADISTICA:
+                return f"Lista llena (max {LIMITE_ESTADISTICA})", "", ""
+            cuerpo = comando.lstrip(":").lstrip("X")
+            partes = cuerpo.split(",")
+            if len(partes) < 2:
+                return "Error: use STATX<x>,<y>", "", ""
+            x_val = float(partes[0])
+            y_val = float(partes[1])
+            ESTADISTICA_LISTA.append(x_val)
+            ESTADISTICA_LISTA_Y.append(y_val)
+            return (f"N = {len(ESTADISTICA_LISTA)}",
+                    f"Par: ({x_val}, {y_val})", "")
+
         if comando.startswith("ADD:") or "ADD:" in comando:
             if len(ESTADISTICA_LISTA) >= LIMITE_ESTADISTICA:
                 return f"Lista llena (max {LIMITE_ESTADISTICA})", "", ""
@@ -843,6 +1010,7 @@ def procesar_estadistica(comando):
 
         if "CLEAR" in comando:
             ESTADISTICA_LISTA = []
+            ESTADISTICA_LISTA_Y = []
             return "Lista limpia", "N = 0", ""
 
         if "CALC" in comando:
@@ -852,9 +1020,34 @@ def procesar_estadistica(comando):
             media = sum(ESTADISTICA_LISTA) / n
             varianza = sum((v - media) ** 2 for v in ESTADISTICA_LISTA) / n
             desviacion = varianza ** 0.5
-            return (f"N = {n}  Media={media:.4f}",
-                    f"Var(s2) = {varianza:.4f}",
-                    f"StdDev(s) = {desviacion:.4f}")
+            l1 = f"N = {n}  Media={media:.4f}"
+            l2 = f"Var(s2) = {varianza:.4f}"
+            l3 = f"StdDev(s) = {desviacion:.4f}"
+
+            # NUEVO 4 (v5.0): si hay datos pareados (x,y), calcular
+            # regresion lineal y=a+bx por minimos cuadrados, y el
+            # coeficiente de correlacion de Pearson "r". Reemplaza l3
+            # (StdDev) por la pendiente/ordenada y agrega r en su lugar
+            # -- la fx-991 tambien prioriza la regresion sobre StdDev
+            # cuando hay datos pareados en modo Reg-Lineal.
+            if len(ESTADISTICA_LISTA_Y) == n and n >= 2:
+                xs, ys = ESTADISTICA_LISTA, ESTADISTICA_LISTA_Y
+                media_y = sum(ys) / n
+                sxx = sum((x - media) ** 2 for x in xs)
+                syy = sum((y - media_y) ** 2 for y in ys)
+                sxy = sum((x - media) * (y - media_y) for x, y in zip(xs, ys))
+                if sxx == 0:
+                    return l1, l2, "Error: x constante"
+                b = sxy / sxx          # pendiente
+                a = media_y - b * media  # ordenada al origen
+                if sxx == 0 or syy == 0:
+                    r = 0.0
+                else:
+                    r = sxy / (sxx ** 0.5 * syy ** 0.5)
+                l2 = f"a={decimal_a_fraccion(a)}  b={decimal_a_fraccion(b)}"
+                l3 = f"r = {r:.4f}"
+
+            return l1, l2, l3
     except Exception:
         pass
     return "Error Estad.", "", ""
@@ -980,33 +1173,81 @@ def cargar_estado():
 
 
 # ==========================================================
-# 10v4.5-B. SETUP (FIX 4 - v4.5)
+# 10v4.5-B. SETUP (FIX 4 - v4.5, completado en v5.0)
 # ==========================================================
 # En v4.3 la tecla SETUP del layout fisico se definia pero nunca
 # se procesaba: el token pasaba al buffer y se evaluaba como
-# expresion desconocida. Ahora cmd_setup() muestra el estado
-# del sistema y permite cambiar angulos (DEG/RAD).
+# expresion desconocida. v4.5 agrego cmd_setup() con DEG/RAD;
+# v5.0 completa FIX/SCI/NORM (NUEVO 3) y conecta MODO_ANGULOS al
+# motor matematico (FIX 0, ver evaluar_rpn).
 MODO_ANGULOS = "DEG"  # "DEG" o "RAD" — usado por el motor trig
+
+# NUEVO 3 (v5.0): formato de presentacion numerica.
+#  - "NORM": comportamiento v4.x (entero limpio, fraccion continua si
+#            es exacta, sino 5 decimales). Por defecto.
+#  - "FIX":  siempre N decimales fijos (FORMATO_DECIMALES, 0-9), sin
+#            intentar fracciones. Ej: FIX 2 -> "3.14".
+#  - "SCI":  notacion cientifica con FORMATO_DECIMALES cifras
+#            significativas tras la coma. Ej: "3.14e+00".
+FORMATO_NUM = "NORM"
+FORMATO_DECIMALES = 4  # 0-9, usado por FIX y SCI
+
 
 def cmd_setup(cmd=""):
     """Muestra y permite cambiar la configuracion del sistema.
-    SETUP       -> muestra estado actual
-    SETUPDEG    -> cambia a grados
-    SETUPRAD    -> cambia a radianes
+    SETUP        -> muestra estado actual
+    SETUPDEG     -> angulos en grados
+    SETUPRAD     -> angulos en radianes
+    SETUPFIX<n>  -> formato fijo de n decimales (0-9)
+    SETUPSCI     -> notacion cientifica (usa FORMATO_DECIMALES cifras)
+    SETUPNORM    -> formato automatico (default, fracciones + 5 dec.)
     Estimacion de RAM: TABLA_MAX_FILAS*2 floats*8 bytes = 720B (seguro)."""
-    global MODO_ANGULOS
+    global MODO_ANGULOS, FORMATO_NUM, FORMATO_DECIMALES
     cmd_u = cmd.upper()
+
     if "DEG" in cmd_u:
         MODO_ANGULOS = "DEG"
         return "Angulos: DEG", "Grados activados", ""
     if "RAD" in cmd_u:
         MODO_ANGULOS = "RAD"
         return "Angulos: RAD", "Radianes activados", ""
+
+    # NUEVO 3 (v5.0): SETUPFIX<n> -- n decimales fijos (0-9)
+    if "FIX" in cmd_u:
+        resto = cmd_u.split("FIX")[-1].strip()
+        try:
+            n = int(resto[0]) if resto and resto[0].isdigit() else FORMATO_DECIMALES
+        except (ValueError, IndexError):
+            n = FORMATO_DECIMALES
+        n = max(0, min(9, n))
+        FORMATO_NUM = "FIX"
+        FORMATO_DECIMALES = n
+        return f"Formato: FIX {n}", f"{n} decimales fijos", ""
+
+    # NUEVO 3 (v5.0): SETUPSCI -- notacion cientifica
+    if "SCI" in cmd_u:
+        resto = cmd_u.split("SCI")[-1].strip()
+        try:
+            n = int(resto[0]) if resto and resto[0].isdigit() else FORMATO_DECIMALES
+        except (ValueError, IndexError):
+            n = FORMATO_DECIMALES
+        n = max(0, min(9, n))
+        FORMATO_NUM = "SCI"
+        FORMATO_DECIMALES = n
+        return f"Formato: SCI {n}", "Notacion cientif.", ""
+
+    # NUEVO 3 (v5.0): SETUPNORM -- vuelve al formato automatico v4.x
+    if "NORM" in cmd_u:
+        FORMATO_NUM = "NORM"
+        return "Formato: NORM", "Fraccion/5 dec.", ""
+
     # Sin argumento: mostrar estado del sistema
     mats_def = sum(1 for m in MATRICES.values() if m is not None)
-    return (f"Ang:{MODO_ANGULOS} Cmplx:{'SI' if MODO_COMPLEJO else 'NO'}",
-            f"Modo:{MODO_CALC_NOMBRES.get(MODO_CALC, '?')} Mat:{mats_def}/3",
+    fmt_txt = FORMATO_NUM if FORMATO_NUM == "NORM" else f"{FORMATO_NUM}{FORMATO_DECIMALES}"
+    return (f"Ang:{MODO_ANGULOS} Fmt:{fmt_txt}",
+            f"Cmplx:{'SI' if MODO_COMPLEJO else 'NO'} Mat:{mats_def}/3",
             f"TABLE max:{TABLA_MAX_FILAS} Den<{FRACCION_DEN_MAX}")
+
 
 
 # ==========================================================
@@ -1097,8 +1338,76 @@ def run_tests():
     r = cmd_cuad("CUAD(1,-5,6)")
     check("CUAD x^2-5x+6", r, ("Cuadratica:", "X1=3", "X2=2"))
 
+    # --- NUEVO 1 (v5.0): FACT / NPR / NCR ---
+    check("5! = 120", decimal_a_fraccion(calcular_factorial(5)), "120")
+    check("0! = 1", decimal_a_fraccion(calcular_factorial(0)), "1")
+    check("NPR(5,2) = 20", decimal_a_fraccion(calcular_npr(5, 2)), "20")
+    check("NCR(5,2) = 10", decimal_a_fraccion(calcular_ncr(5, 2)), "10")
+    check("NCR(170,2) sin overflow", decimal_a_fraccion(calcular_ncr(170, 2)), "14365")
+    try:
+        calcular_factorial(-1)
+        check("FACT(-1) lanza error", "no lanzó", "error")
+    except ValueError:
+        check("FACT(-1) lanza error", "error", "error")
+    try:
+        calcular_factorial(171)
+        check("FACT(171) lanza error (overflow)", "no lanzó", "error")
+    except ValueError:
+        check("FACT(171) lanza error (overflow)", "error", "error")
+
+    # --- NUEVO 2 (v5.0): CONJ / ARG ---
+    prev_c = globals()["MODO_COMPLEJO"]
+    globals()["MODO_COMPLEJO"] = True
+    r, *_ = procesar_todo("CONJ(2+3*I)")
+    check("CONJ(2+3i) = 2-3i", r, "2-3i")
+    r, *_ = procesar_todo("ARG(0+1*I)")
+    check("ARG(i) = 90 (DEG)", r, "90")
+    globals()["MODO_COMPLEJO"] = prev_c
+    r, *_ = procesar_todo("ARG(5)")
+    check("ARG(5 real) = 0", r, "0")
+    r, *_ = procesar_todo("ARG(-5)")
+    check("ARG(-5 real) = 180", r, "180")
+
+    # --- NUEVO 3 (v5.0): SETUP RAD activa el motor (FIX 0) ---
+    prev_ang = globals()["MODO_ANGULOS"]
+    cmd_setup("SETUPRAD")
+    r, *_ = procesar_todo("SIN(PI/2)")
+    check("SIN(PI/2) en RAD = 1", r, "1")
+    cmd_setup("SETUPDEG")
+    r, *_ = procesar_todo("SIN(90)")
+    check("SIN(90) en DEG = 1", r, "1")
+    globals()["MODO_ANGULOS"] = prev_ang
+
+    # --- NUEVO 3 (v5.0): SETUP FIX / SCI / NORM ---
+    prev_fmt = globals()["FORMATO_NUM"]
+    prev_dec = globals()["FORMATO_DECIMALES"]
+    cmd_setup("SETUPFIX2")
+    r, *_ = procesar_todo("1/3")
+    check("1/3 en FIX2 = 0.33", r, "0.33")
+    cmd_setup("SETUPSCI3")
+    r, *_ = procesar_todo("123456")
+    check("123456 en SCI3 = 1.235e+05", r, "1.235e+05")
+    cmd_setup("SETUPNORM")
+    r, *_ = procesar_todo("1/3")
+    check("1/3 en NORM = 1/3", r, "1/3")
+    globals()["FORMATO_NUM"] = prev_fmt
+    globals()["FORMATO_DECIMALES"] = prev_dec
+
+    # --- NUEVO 4 (v5.0): STAT regresion lineal y=2x+1 ---
+    prev_x = list(globals()["ESTADISTICA_LISTA"])
+    prev_y = list(globals()["ESTADISTICA_LISTA_Y"])
+    procesar_estadistica("CLEAR")
+    for x, y in [(1, 3), (2, 5), (3, 7), (4, 9)]:
+        procesar_estadistica(f"X{x},{y}")
+    l1, l2, l3 = procesar_estadistica("CALC")
+    check("STAT regresion y=2x+1 -> a=1 b=2", l2, "a=1  b=2")
+    check("STAT regresion y=2x+1 -> r=1", l3, "r = 1.0000")
+    procesar_estadistica("CLEAR")
+    globals()["ESTADISTICA_LISTA"] = prev_x
+    globals()["ESTADISTICA_LISTA_Y"] = prev_y
+
     total = pasados + fallados
-    print(f"\n=== TEST SUITE PiCalc v4.5 ===")
+    print(f"\n=== TEST SUITE PiCalc v5.0 ===")
     for l in log:
         print(l)
     print(f"\nResultado: {pasados}/{total} pasados")
@@ -1479,6 +1788,7 @@ ALIAS_TOKENS.update({
     "POL": "POL(", "REC": "REC(",
     "CUAD": "CUAD(", "CUB": "CUB(",
     "BIN": "BIN(", "OCT": "OCT(", "HEX": "HEX(",
+    "NPR": "NPR(", "NCR": "NCR(",  # NUEVO 1 (v5.0): permutaciones/combinaciones
 })
 
 
@@ -1659,6 +1969,21 @@ def procesar_todo(entrada_cruda):
             val2 = int(evaluar_expresion(p[1].strip("() "), variables_actuales()))
             return f"MCM = {mcm(val1, val2)}", "", ""
 
+        # ---- NUEVO 1 (v5.0): NPR / NCR (permutaciones / combinaciones) ----
+        # NPR(n,r) y NCR(n,r) (orden de chequeo: NPR antes que NCR no es
+        # relevante, los nombres no se superponen). Igual que MCD/MCM,
+        # se evaluan los argumentos para soportar variables (NPR(A,2)).
+        if "NPR" in cmd:
+            p = cmd.split("NPR")[-1].split(",")
+            n = evaluar_expresion(p[0].strip("() "), variables_actuales())
+            r = evaluar_expresion(p[1].strip("() "), variables_actuales())
+            return f"NPR = {decimal_a_fraccion(calcular_npr(n, r))}", "", ""
+        if "NCR" in cmd:
+            p = cmd.split("NCR")[-1].split(",")
+            n = evaluar_expresion(p[0].strip("() "), variables_actuales())
+            r = evaluar_expresion(p[1].strip("() "), variables_actuales())
+            return f"NCR = {decimal_a_fraccion(calcular_ncr(n, r))}", "", ""
+
         # ---- v4.0: NUEVAS FUNCIONES ----
         if "CMPLX" in cmd:
             return toggle_cmplx(), f"MODO_CMPLX={'ON' if MODO_COMPLEJO else 'OFF'}", ""
@@ -1727,9 +2052,11 @@ def procesar_todo(entrada_cruda):
 # 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3
 # ==========================================================
 INSTRUCCIONES = (
-    "PiCalc OS v4.5 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v5.0 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
+    "Combinatoria: FACT(n)=n!  NPR(n,r)  NCR(n,r)\n"
+    "Complejo: CMPLX (toggle) | I=unidad imag. | CONJ(z) ARG(z)\n"
     "Memoria: A B C X Y ANS  |  Comandos: STO RCL\n"
     "Calculo: SOLVE DERIV<f>,<x>  INT<f>,<a>,<b>  MCD MCM RAND PRIMOS\n"
     "Matrices (sistemas): MAT2 MAT3 DOT CROSS\n"
@@ -1737,7 +2064,8 @@ INSTRUCCIONES = (
     "Polinomios: CUAD(a,b,c)  CUB(a,b,c,d)\n"
     "Tabla: TABLE<expr>,<ini>,<fin>,<paso>\n"
     "Base-N: BIN(n) OCT(n) HEX(n) AND(a,b) OR(a,b) XOR(a,b) NOT(n)\n"
-    "Complejo: CMPLX (toggle) | usar I como unidad imaginaria\n"
+    "Estadistica: STATADD:<v> | STATX<x>,<y> (regresion) | STATCALC | STATCLEAR\n"
+    "SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI  SETUPNORM\n"
     "Control: AC DEL IGUAL BYPASS=modo examen\n"
     "Cursor: IZQ DER  |  Menu modos: MODE  (luego digita 1-8)"
 )
@@ -1757,7 +2085,7 @@ def iniciar():
     # En primer arranque el archivo no existe y cargar_estado devuelve False.
     estado_cargado = cargar_estado()
 
-    renderizar_pantalla("PiCalc OS v4.5", f"Modo Examen: {MODO_EXAMEN}",
+    renderizar_pantalla("PiCalc OS v5.0", f"Modo Examen: {MODO_EXAMEN}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
