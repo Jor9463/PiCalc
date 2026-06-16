@@ -75,7 +75,67 @@ import json  # persistencia en flash (Pico usa ujson; mismo API)
 #   cadenas poco claras "nan"/"inf"/"-inf" que producia format().
 # ==========================================================
 # ==========================================================
-# PiCalc OS v4.5  –  Changelog desde v4.4 (historico)
+# PiCalc OS v5.2  –  Changelog desde v5.1 (revision externa)
+# ----------------------------------------------------------
+# FIX 1 (ALTA - STAT mezcla de datos 1v/2v):
+#   procesar_estadistica() ahora detecta explicitamente si
+#   ESTADISTICA_DATOS mezcla puntos de 1 variable (ADD:v -> y=None)
+#   con puntos pareados (STATX<x>,<y> -> y=valor). Antes, el chequeo
+#   "all(y is not None for y in ys)" simplemente fallaba en silencio
+#   y STATCALC devolvia N/Media/Var sin avisar por que no hubo
+#   regresion. Ahora l3 muestra "Error: mezcla 1v/2v" para que el
+#   usuario sepa que debe STATCLEAR antes de cambiar de modo.
+#
+# FIX 2 (MEDIA - notacion cientifica estilo Casio):
+#   decimal_a_fraccion() con FORMATO_NUM="SCI" usaba ".e" (minuscula,
+#   estilo Python: "1.235e+05"). Ahora usa ".E" (mayuscula: "1.235E+05"),
+#   mas cercano a la convencion Casio/calculadoras cientificas.
+#
+# FIX 3 (MEDIA - BYPASS mas claro):
+#   El toggle de MODO_EXAMEN mostraba "Modo Examen: True/False" (booleano
+#   crudo de Python). Ahora muestra "Examen: ACTIVO" / "Examen: INACTIVO",
+#   mas legible para quien no programa.
+#
+# FIX 4 (CRITICO - persistencia rota en PC):
+#   _RUTA_ESTADO = "/picalc_state.json" if True else "./picalc_state.json"
+#   SIEMPRE evaluaba a la rama "if True", es decir SIEMPRE usaba la ruta
+#   absoluta de la Pico ("/picalc_state.json"), incluso corriendo en PC,
+#   donde esa ruta no existe / no se puede escribir (falla silenciosa
+#   dentro del try/except de guardar_estado/cargar_estado). Ahora se usa
+#   ENTORNO_PICO para elegir la ruta correcta en cada plataforma.
+#
+# FIX 5 (COSMETICA - _parsear_decimales mas defensivo):
+#   Se agrega un .strip() interno al inicio de _parsear_decimales(),
+#   por si en el futuro algun llamador pasa el resto sin recortar
+#   (los llamadores actuales ya hacian .strip() antes de llamar).
+#
+# NUEVO 1 (TABLE con scroll real):
+#   Tras generar una tabla con TABLE<f>,<ini>,<fin>,<paso>, las teclas
+#   IZQ/DER (cuando el buffer de entrada esta vacio) navegan fila por
+#   fila por TABLA_RESULTADO mostrando "fila i/n: x=... f(x)=...",
+#   en vez de mostrar solo la primera fila con un mensaje generico.
+#
+# NUEVO 2 (Modo VECTOR real - VEC2/VEC3):
+#   Se agregan VEC2(x,y) y VEC3(x,y,z): calculan el modulo |v| y el/los
+#   angulo(s) del vector respecto a los ejes (en DEG o RAD segun
+#   MODO_ANGULOS). Junto con DOT/CROSS ya existentes, el modo 8
+#   (VECTOR) del menu MODE ahora tiene operaciones propias, no solo
+#   las de sistemas de ecuaciones.
+#
+# NUEVO 3 (Submenu EQN dedicado):
+#   Al seleccionar el modo 5 (EQN) desde el menu MODE, se abre un
+#   submenu con 1:Sistema 2x2  2:Sistema 3x3  3:Cuadratica  4:Cubica.
+#   Elegir una opcion precarga el token correspondiente (MAT2(, MAT3(,
+#   CUAD(, CUB() en ENTRADA_TOKENS, listo para que el usuario complete
+#   los argumentos -- replica el flujo "elegir tipo de ecuacion" de
+#   la fx-991 real.
+#
+# NUEVO 4 (Sugerencias contextuales de MODE):
+#   Al confirmar un modo en el menu MODE, la tercera linea de pantalla
+#   muestra un recordatorio rapido de los comandos relevantes para ese
+#   modo (ej. en BASE-N: "BIN OCT HEX AND OR").
+# ==========================================================
+
 # ----------------------------------------------------------
 # FIX 1 (CRITICO - _evaluar_entero en BASE-N):
 #   Ahora valida que el resultado no sea complex ni NaN antes
@@ -142,6 +202,7 @@ LIMITE_ESTADISTICA = 50  # cuida la RAM de la Pico
 MODO_COMPLEJO = False
 MATRICES = {"A": None, "B": None, "C": None}
 TABLA_RESULTADO = []
+TABLA_INDICE = 0  # NUEVO 1 (v5.2): fila actual mostrada al navegar con IZQ/DER
 
 # ---- Estado v4.3: Modo de calculadora (menu MODE) ----
 # 1=COMP, 2=CMPLX, 3=STAT, 4=BASE-N, 5=EQN, 6=MATRIX, 7=TABLE, 8=VECTOR
@@ -151,6 +212,9 @@ MODO_CALC_NOMBRES = {
     5: "EQN",  6: "MATRIX", 7: "TABLE", 8: "VECTOR",
 }
 EN_MENU_MODE = False
+# NUEVO 3 (v5.2): submenu de tipo de ecuacion, abierto tras elegir
+# el modo 5 (EQN) en el menu MODE.
+EN_MENU_EQN = False
 
 # FIX 4 (v4.4): variable de seleccion separada del MODO_CALC confirmado.
 # IZQ/DER mueven _SELECCION_MENU sin pisar MODO_CALC hasta que el
@@ -232,8 +296,8 @@ LAYOUT_TECLADO_2ND = [
     ["MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV", "SAVE", "TEST"],
     # NUEVO (v5.0): FACT(n!), NPR/NCR (permutaciones/combinaciones),
     # CONJ/ARG (numeros complejos), STATX (regresion lineal pareada).
-    ["FACT(", "NPR(", "NCR(", "CONJ(", "ARG(", "STATX", "STATCLEAR", ""],
-    ["", "", "", "", "", "", "", ""],
+    ["FACT(", "NPR(", "NCR(", "CONJ(", "ARG(", "STATX", "STATCLEAR", "VEC2("],
+    ["VEC3(", "", "", "", "", "", "", ""],
 ]
 
 _ultimo_estado = {}
@@ -818,9 +882,11 @@ def decimal_a_fraccion(val):
             return f"{val:.5f}"
     if FORMATO_NUM == "SCI":
         try:
-            return f"{val:.{FORMATO_DECIMALES}e}"
+            # FIX 2 (v5.2): "E" mayuscula (estilo Casio "1.235E+05")
+            # en vez de "e" minuscula (estilo Python "1.235e+05").
+            return f"{val:.{FORMATO_DECIMALES}E}"
         except Exception:
-            return f"{val:.5e}"
+            return f"{val:.5E}"
 
     # FIX v4.2: el chequeo de entero y la aproximacion a fraccion se aplican
     # SIEMPRE, incluso en MODO_EXAMEN. Antes, en examen (modo por defecto),
@@ -1096,9 +1162,18 @@ def procesar_estadistica(comando):
             l2 = f"Var(s2) = {varianza:.4f}"
             l3 = f"StdDev(s) = {desviacion:.4f}"
 
-            # Regresion lineal solo si TODOS los puntos son pareados
-            # (ningun "y" es None) y hay al menos 2 datos.
-            if n >= 2 and all(y is not None for y in ys):
+            # FIX 1 (v5.2): si ESTADISTICA_DATOS mezcla puntos de 1
+            # variable (ADD:v -> y=None) con puntos pareados
+            # (STATX<x>,<y> -> y=valor), la regresion no es valida.
+            # Antes "all(y is not None for y in ys)" simplemente daba
+            # False y el usuario se quedaba sin saber por que no habia
+            # regresion. Ahora se avisa explicitamente en l3.
+            hay_simple = any(y is None for y in ys)
+            hay_pareado = any(y is not None for y in ys)
+
+            if hay_simple and hay_pareado:
+                l3 = "Error: mezcla 1v/2v"
+            elif n >= 2 and all(y is not None for y in ys):
                 media_y = sum(ys) / n
                 # sxx = varianza * n: es la misma suma que ya calculamos
                 # arriba para varianza, sin recorrer xs de nuevo.
@@ -1166,9 +1241,13 @@ def comando_rcl(cmd):
 #                 "modo_complejo": false, "matrices": {...} }
 # Los valores complex se serializan como [real, imag] y se
 # reconstruyen al cargar (comportamiento intencional, ver NUEVO 2).
-_RUTA_ESTADO = "/picalc_state.json" if True else "./picalc_state.json"
-# En la Pico SIEMPRE es /picalc_state.json. En PC se puede
-# cambiar a "./" manualmente para desarrollo local.
+_RUTA_ESTADO = "/picalc_state.json" if ENTORNO_PICO else "./picalc_state.json"
+# FIX 4 (v5.2): la condicion anterior era "if True", asi que SIEMPRE
+# elegia "/picalc_state.json" sin importar la plataforma. En PC esa
+# ruta absoluta no se puede crear/escribir (permiso denegado o
+# directorio inexistente), y como guardar_estado/cargar_estado estan
+# envueltos en try/except, la persistencia fallaba en silencio durante
+# el desarrollo. Ahora se usa ENTORNO_PICO para elegir la ruta correcta.
 
 try:
     import ujson as _json_mod   # MicroPython
@@ -1274,6 +1353,13 @@ def cargar_estado():
 # motor matematico (FIX 0, ver evaluar_rpn).
 MODO_ANGULOS = "DEG"  # "DEG" o "RAD" — usado por el motor trig
 
+
+def _rad_a_modo_angular(rad):
+    """Convierte un angulo en radianes al MODO_ANGULOS actual (DEG/RAD).
+    Usado por VEC2/VEC3 (NUEVO 2, v5.2) para mostrar angulos de forma
+    consistente con SETUP DEG/RAD, igual que ASIN/ACOS/ATAN."""
+    return math.degrees(rad) if MODO_ANGULOS == "DEG" else rad
+
 # NUEVO 3 (v5.0): formato de presentacion numerica.
 #  - "NORM": comportamiento v4.x (entero limpio, fraccion continua si
 #            es exacta, sino 5 decimales). Por defecto.
@@ -1290,7 +1376,11 @@ def _parsear_decimales(resto, predeterminado):
     que sigue a FIX/SCI, tomando TODOS los digitos consecutivos (no
     solo el primero) y recortando al rango valido al final.
     Ej: 'SETUPFIX10' -> resto='10' -> 10 -> recortado a 9 (no a 1,
-    como pasaba antes al leer solo resto[0])."""
+    como pasaba antes al leer solo resto[0]).
+    FIX 5 (v5.2): .strip() defensivo al inicio, por si algun futuro
+    llamador pasa el resto con espacios sin recortar (los llamadores
+    actuales ya hacian .strip() antes de llamar)."""
+    resto = resto.strip()
     digitos = ""
     for ch in resto:
         if ch.isdigit():
@@ -1505,7 +1595,7 @@ def run_tests():
     globals()["ESTADISTICA_DATOS"] = prev_datos
 
     total = pasados + fallados
-    print(f"\n=== TEST SUITE PiCalc v5.1 ===")
+    print(f"\n=== TEST SUITE PiCalc v5.2 ===")
     for l in log:
         print(l)
     print(f"\nResultado: {pasados}/{total} pasados")
@@ -1775,7 +1865,7 @@ def cmd_table(cmd):
     cuando se suma paso repetidamente.
     FIX 9 (v4.4): el limite usa TABLA_MAX_FILAS (constante independiente
     de LIMITE_ESTADISTICA) para que ambas no se interfieran."""
-    global TABLA_RESULTADO
+    global TABLA_RESULTADO, TABLA_INDICE
     if MODO_EXAMEN:
         return "Error: No disp", "", ""
     try:
@@ -1809,12 +1899,31 @@ def cmd_table(cmd):
         if not TABLA_RESULTADO:
             return "Tabla vacia", "", ""
 
+        # NUEVO 1 (v5.2): arrancar el scroll desde la primera fila.
+        TABLA_INDICE = 0
         x0, fx0 = TABLA_RESULTADO[0]
-        return (f"TABLE ({len(TABLA_RESULTADO)} pts)",
-                f"x={x0} f={decimal_a_fraccion(fx0)}",
-                "DEL=ver sig." if len(TABLA_RESULTADO) > 1 else "")
+        n = len(TABLA_RESULTADO)
+        return (f"TABLE ({n} pts)",
+                f"fila 1/{n}: x={x0}",
+                f"f(x)={decimal_a_fraccion(fx0)}" + (" IZQ/DER" if n > 1 else ""))
     except Exception as ex:
         return f"Error Table: {ex}", "", ""
+
+
+def renderizar_tabla_fila():
+    """NUEVO 1 (v5.2): muestra la fila TABLA_INDICE de TABLA_RESULTADO.
+    Se invoca desde IZQ/DER cuando el buffer de entrada esta vacio,
+    permitiendo recorrer fila por fila la ultima TABLE generada
+    (en vez de solo ver la primera fila como en v5.1)."""
+    n = len(TABLA_RESULTADO)
+    if n == 0:
+        renderizar_pantalla("0", cursor_pos=0)
+        return
+    x, fx = TABLA_RESULTADO[TABLA_INDICE]
+    renderizar_pantalla(f"TABLE fila {TABLA_INDICE + 1}/{n}",
+                         f"x = {x}",
+                         f"f(x) = {decimal_a_fraccion(fx)}",
+                         "IZQ/DER mueve, AC sale")
 
 
 # ==========================================================
@@ -1869,6 +1978,50 @@ def cmd_basen(cmd):
 
 
 # ==========================================================
+# 11v5.2. MODULO VECTOR: VEC2/VEC3 (modulo + angulos)
+# ==========================================================
+# NUEVO 2 (v5.2): el modo 8 (VECTOR) del menu MODE ya tenia DOT/CROSS
+# (producto escalar/vectorial entre DOS vectores), pero no tenia ninguna
+# operacion sobre UN solo vector (modulo, direccion), que es lo que la
+# Casio fx-991 ofrece como entrada principal del modo VECTOR.
+def cmd_vector(cmd):
+    """VEC2(x,y)  -> modulo |v| y angulo respecto al eje X.
+    VEC3(x,y,z) -> modulo |v| y los 3 angulos directores (con los ejes
+                   X, Y, Z), via acos(componente/modulo).
+    Los angulos se muestran en DEG o RAD segun MODO_ANGULOS (SETUP)."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        if "VEC2" in cmd:
+            nums = extraer_numeros(cmd, "VEC2")
+            if len(nums) != 2:
+                return "Use VEC2(", "x,y)", ""
+            x, y = nums
+            mag = math.hypot(x, y)
+            ang = _rad_a_modo_angular(math.atan2(y, x))
+            return (f"|v| = {decimal_a_fraccion(mag)}",
+                    f"ang = {decimal_a_fraccion(ang)}", "")
+
+        if "VEC3" in cmd:
+            nums = extraer_numeros(cmd, "VEC3")
+            if len(nums) != 3:
+                return "Use VEC3(", "x,y,z)", ""
+            x, y, z = nums
+            mag = math.sqrt(x * x + y * y + z * z)
+            if mag == 0:
+                return "|v| = 0", "Vector nulo", ""
+            ax = _rad_a_modo_angular(math.acos(max(-1.0, min(1.0, x / mag))))
+            ay = _rad_a_modo_angular(math.acos(max(-1.0, min(1.0, y / mag))))
+            az = _rad_a_modo_angular(math.acos(max(-1.0, min(1.0, z / mag))))
+            return (f"|v| = {decimal_a_fraccion(mag)}",
+                    f"aX={decimal_a_fraccion(ax)} aY={decimal_a_fraccion(ay)}",
+                    f"aZ = {decimal_a_fraccion(az)}")
+    except Exception as ex:
+        return f"Error Vec: {ex}", "", ""
+    return "Error Vec", "", ""
+
+
+# ==========================================================
 # 11. CAPA DE ENTRADA: TOKENS Y MULTIPLICACION IMPLICITA
 # ==========================================================
 # Atajos de teclado/consola -> token real inyectado en ENTRADA_TOKENS.
@@ -1887,6 +2040,7 @@ ALIAS_TOKENS.update({
     "CUAD": "CUAD(", "CUB": "CUB(",
     "BIN": "BIN(", "OCT": "OCT(", "HEX": "HEX(",
     "NPR": "NPR(", "NCR": "NCR(",  # NUEVO 1 (v5.0): permutaciones/combinaciones
+    "VEC2": "VEC2(", "VEC3": "VEC3(",  # NUEVO 2 (v5.2): modo VECTOR real
 })
 
 
@@ -1997,8 +2151,12 @@ def renderizar_menu_mode(seleccion=None):
 
 def aplicar_modo(num):
     """Aplica el modo seleccionado del menu MODE y devuelve mensaje
-    de confirmacion al estilo Casio (ej: 'COMP Mode')."""
-    global MODO_CALC, MODO_COMPLEJO, EN_MENU_MODE
+    de confirmacion al estilo Casio (ej: 'COMP Mode').
+
+    NUEVO 3 (v5.2): si num==5 (EQN), en vez de confirmar directamente
+    se abre el submenu EN_MENU_EQN (2x2/3x3/Cuadratica/Cubica), igual
+    que la fx-991 real pide el tipo de ecuacion al entrar a EQN."""
+    global MODO_CALC, MODO_COMPLEJO, EN_MENU_MODE, EN_MENU_EQN
     if num not in MODO_CALC_NOMBRES:
         return "Opcion invalida"
     MODO_CALC = num
@@ -2011,7 +2169,72 @@ def aplicar_modo(num):
         if num == 1:
             MODO_COMPLEJO = False
     EN_MENU_MODE = False
+    if num == 5:
+        EN_MENU_EQN = True
     return f"{nombre} Mode"
+
+
+# ==========================================================
+# 11b-2. SUBMENU EQN (v5.2) - tipo de ecuacion
+# ==========================================================
+_OPCIONES_EQN = [
+    (1, "Sist. 2x2", "MAT2("),
+    (2, "Sist. 3x3", "MAT3("),
+    (3, "Cuadratica", "CUAD("),
+    (4, "Cubica", "CUB("),
+]
+
+
+def renderizar_menu_eqn():
+    """Muestra el submenu EQN: tipo de ecuacion a resolver.
+    Elegir una opcion precarga su token en ENTRADA_TOKENS, listo
+    para que el usuario complete los argumentos (coeficientes)."""
+    if ENTORNO_PICO and display:
+        display.fill(0)
+        display.text("=== EQN ===", 0, 2, 1)
+        display.text("1:Sist 2x2", 0, 16, 1)
+        display.text("2:Sist 3x3", 0, 28, 1)
+        display.text("3:Cuad 4:Cubica", 0, 40, 1)
+        display.text("AC=salir", 0, 52, 1)
+        display.show()
+    else:
+        print("\n" + "=" * 36)
+        print("|        [MENU EQN]                |")
+        print("-" * 36)
+        for num, nombre, _tok in _OPCIONES_EQN:
+            print(f"|  {num}: {nombre:<28}|")
+        print("-" * 36)
+        print("|  Digita numero (1-4) o AC=salir   |")
+        print("=" * 36)
+
+
+def aplicar_eqn(num):
+    """Precarga ENTRADA_TOKENS con el token de la ecuacion elegida
+    (MAT2(, MAT3(, CUAD(, CUB() y posiciona el cursor al final, listo
+    para que el usuario escriba los coeficientes. Devuelve True si
+    'num' fue una opcion valida (1-4), False en caso contrario."""
+    global ENTRADA_TOKENS, CURSOR_POS, EN_MENU_EQN
+    opciones = {n: tok for n, _nm, tok in _OPCIONES_EQN}
+    if num not in opciones:
+        return False
+    ENTRADA_TOKENS = [opciones[num]]
+    CURSOR_POS = len(ENTRADA_TOKENS)
+    EN_MENU_EQN = False
+    return True
+
+
+# NUEVO 4 (v5.2): recordatorio rapido de comandos al confirmar un modo
+# desde el menu MODE (tercera linea de pantalla).
+SUGERENCIAS_MODO = {
+    1: "Calculo normal",
+    2: "I=imag CONJ() ARG()",
+    3: "ADD:v STATX x,y CALC",
+    4: "BIN OCT HEX AND OR",
+    5: "",  # EQN abre su propio submenu
+    6: "MATDEF MATMUL MATDET",
+    7: "TABLE f,ini,fin,paso",
+    8: "VEC2() VEC3() DOT() CROSS()",
+}
 
 
 # ==========================================================
@@ -2039,6 +2262,9 @@ def procesar_todo(entrada_cruda):
             return resolver_ecuacion_lineal(cmd.split("SOLVE")[-1]), "", ""
         if "MAT2" in cmd or "MAT3" in cmd or "DOT" in cmd or "CROSS" in cmd:
             return resolver_sistema_matrices(cmd)
+        # NUEVO 2 (v5.2): modo VECTOR real (modulo + angulos de un vector)
+        if "VEC2" in cmd or "VEC3" in cmd:
+            return cmd_vector(cmd)
         if "DERIV" in cmd:
             # FIX v3.2: separador "," en vez de ";" (la coma SI existe en el
             # teclado fisico; el punto y coma no tiene tecla asignada).
@@ -2150,22 +2376,23 @@ def procesar_todo(entrada_cruda):
 # 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3
 # ==========================================================
 INSTRUCCIONES = (
-    "PiCalc OS v5.1 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v5.2 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
     "Combinatoria: FACT(n)=n!  NPR(n,r)  NCR(n,r)\n"
     "Complejo: CMPLX (toggle) | I=unidad imag. | CONJ(z) ARG(z)\n"
+    "Vectores: VEC2(x,y) VEC3(x,y,z) -> modulo+angulos | DOT CROSS\n"
     "Memoria: A B C X Y ANS  |  Comandos: STO RCL\n"
     "Calculo: SOLVE DERIV<f>,<x>  INT<f>,<a>,<b>  MCD MCM RAND PRIMOS\n"
     "Matrices (sistemas): MAT2 MAT3 DOT CROSS\n"
     "Matrices (algebra): MATDEF<n>,<f>,<c>,vals  MATADD MATMUL MATTRANS MATDET MATINV\n"
     "Polinomios: CUAD(a,b,c)  CUB(a,b,c,d)\n"
-    "Tabla: TABLE<expr>,<ini>,<fin>,<paso>\n"
+    "Tabla: TABLE<expr>,<ini>,<fin>,<paso>  | luego IZQ/DER recorre filas\n"
     "Base-N: BIN(n) OCT(n) HEX(n) AND(a,b) OR(a,b) XOR(a,b) NOT(n)\n"
     "Estadistica: STATADD:<v> | STATX<x>,<y> (regresion) | STATCALC | STATCLEAR\n"
     "SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI  SETUPNORM\n"
     "Control: AC DEL IGUAL BYPASS=modo examen\n"
-    "Cursor: IZQ DER  |  Menu modos: MODE  (luego digita 1-8)"
+    "Cursor: IZQ DER  |  Menu modos: MODE (digita 1-8; el 5=EQN abre submenu 1-4)"
 )
 
 
@@ -2178,12 +2405,13 @@ def _pos_caracter_cursor(tokens, cursor_pos):
 
 def iniciar():
     global MODO_EXAMEN, ENTRADA_TOKENS, CURSOR_POS, EN_MENU_MODE, _SELECCION_MENU
+    global TABLA_INDICE, EN_MENU_EQN
 
     # NUEVO 1 (v4.5): cargar estado guardado en flash al arrancar.
     # En primer arranque el archivo no existe y cargar_estado devuelve False.
     estado_cargado = cargar_estado()
 
-    renderizar_pantalla("PiCalc OS v5.1", f"Modo Examen: {MODO_EXAMEN}",
+    renderizar_pantalla("PiCalc OS v5.2", f"Examen: {'ACTIVO' if MODO_EXAMEN else 'INACTIVO'}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
@@ -2226,14 +2454,43 @@ def iniciar():
             elif accion_u == "IGUAL":
                 # Confirmar la seleccion resaltada por IZQ/DER
                 msg = aplicar_modo(_SELECCION_MENU)
-                renderizar_pantalla(msg, f"Modo: {MODO_CALC_NOMBRES[MODO_CALC]}")
+                if EN_MENU_EQN:
+                    renderizar_menu_eqn()
+                else:
+                    renderizar_pantalla(msg, f"Modo: {MODO_CALC_NOMBRES[MODO_CALC]}",
+                                         SUGERENCIAS_MODO.get(MODO_CALC, ""))
             elif accion_u.isdigit() and 1 <= int(accion_u) <= 8:
                 num = int(accion_u)
                 _SELECCION_MENU = num
                 msg = aplicar_modo(num)
-                renderizar_pantalla(msg, f"Modo: {MODO_CALC_NOMBRES[MODO_CALC]}")
+                if EN_MENU_EQN:
+                    renderizar_menu_eqn()
+                else:
+                    renderizar_pantalla(msg, f"Modo: {MODO_CALC_NOMBRES[MODO_CALC]}",
+                                         SUGERENCIAS_MODO.get(MODO_CALC, ""))
             else:
                 renderizar_menu_mode(_SELECCION_MENU)
+            continue
+
+        # ==================================================
+        # BLOQUE MENU EQN (v5.2)
+        # Submenu abierto al confirmar el modo 5 (EQN) en MODE.
+        # Solo acepta: digitos 1-4 (tipo de ecuacion -> precarga token),
+        #              AC (cerrar sin elegir nada).
+        # ==================================================
+        if EN_MENU_EQN:
+            if accion_u == "AC":
+                EN_MENU_EQN = False
+                expr_actual = "".join(ENTRADA_TOKENS) or "0"
+                cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
+                renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
+            elif accion_u.isdigit() and aplicar_eqn(int(accion_u)):
+                expr_actual = "".join(ENTRADA_TOKENS)
+                cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
+                renderizar_pantalla(expr_actual, "Completa los datos",
+                                    "e IGUAL", cursor_pos=cur_ch)
+            else:
+                renderizar_menu_eqn()
             continue
 
         # ==================================================
@@ -2243,9 +2500,12 @@ def iniciar():
         # ---- BYPASS: toggle modo examen ----
         if accion_u == "BYPASS":
             MODO_EXAMEN = not MODO_EXAMEN
+            # FIX 3 (v5.2): texto legible en vez del booleano crudo
+            # "Modo Examen: True/False".
+            estado = "ACTIVO" if MODO_EXAMEN else "INACTIVO"
             expr_actual = "".join(ENTRADA_TOKENS) or "0"
             cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
-            renderizar_pantalla(expr_actual, f"Modo Examen: {MODO_EXAMEN}",
+            renderizar_pantalla(expr_actual, f"Examen: {estado}",
                                 cursor_pos=cur_ch)
             continue
 
@@ -2272,8 +2532,15 @@ def iniciar():
             renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
             continue
 
-        # ---- IZQ: mover cursor a la izquierda (v4.3) ----
+        # ---- IZQ: mover cursor a la izquierda, o retroceder en TABLE (v5.2) ----
         if accion_u == "IZQ":
+            # NUEVO 1 (v5.2): si el buffer esta vacio y hay una TABLE
+            # generada, IZQ/DER navegan filas en vez de mover el cursor
+            # (que no tiene nada para mover en un buffer vacio).
+            if not ENTRADA_TOKENS and TABLA_RESULTADO:
+                TABLA_INDICE = (TABLA_INDICE - 1) % len(TABLA_RESULTADO)
+                renderizar_tabla_fila()
+                continue
             if CURSOR_POS > 0:
                 CURSOR_POS -= 1
             expr_actual = "".join(ENTRADA_TOKENS) or "0"
@@ -2281,8 +2548,12 @@ def iniciar():
             renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
             continue
 
-        # ---- DER: mover cursor a la derecha (v4.3) ----
+        # ---- DER: mover cursor a la derecha, o avanzar en TABLE (v5.2) ----
         if accion_u == "DER":
+            if not ENTRADA_TOKENS and TABLA_RESULTADO:
+                TABLA_INDICE = (TABLA_INDICE + 1) % len(TABLA_RESULTADO)
+                renderizar_tabla_fila()
+                continue
             if CURSOR_POS < len(ENTRADA_TOKENS):
                 CURSOR_POS += 1
             expr_actual = "".join(ENTRADA_TOKENS) or "0"
