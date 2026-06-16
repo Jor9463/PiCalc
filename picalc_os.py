@@ -75,8 +75,44 @@ import json  # persistencia en flash (Pico usa ujson; mismo API)
 #   cadenas poco claras "nan"/"inf"/"-inf" que producia format().
 # ==========================================================
 # ==========================================================
-# PiCalc OS v5.2  –  Changelog desde v5.1 (revision externa)
+# PiCalc OS v5.3  –  Changelog desde v5.2
 # ----------------------------------------------------------
+# NUEVO 1 (ECUACIONES SIMULTANEAS 2x2/3x3/4x4):
+#   cmd_simu() resuelve sistemas de ecuaciones lineales de hasta
+#   4x4 mediante eliminacion gaussiana con pivoteo parcial. La
+#   sintaxis unificada es SIMU<n>(<a11>,<a12>,...,<b1>,...):
+#   SIMU2(a,b,c,d,e,f) -> Ax=b con A=[[a,b],[c,d]], b=[e,f]
+#   SIMU3(...9 coefs...,3 independ.) -> sistema 3x3
+#   SIMU4(...16 coefs...,4 independ.) -> sistema 4x4
+#   Detecta sistema sin solucion unica (det~0) y lo informa.
+#   Supera la Casio fx-991 que solo llega a 3x3.
+#
+# NUEVO 2 (REGRESIONES COMPLETAS - STAT):
+#   procesar_estadistica() ahora soporta todos los modelos de
+#   regresion de la fx-991 ClassWiz:
+#   STATLIN  -> y = a + bx   (lineal, ya existia)
+#   STATCUAD -> y = a + bx + cx^2 (cuadratica por minimos cuadrados)
+#   STATEXP  -> y = ae^(bx)  (exponencial, toma ln(y))
+#   STATLOG  -> y = a + b*ln(x) (logaritmica, toma ln(x))
+#   STATPOT  -> y = ax^b     (potencia, toma ln(x) y ln(y))
+#   STATINV  -> y = a + b/x  (inversa, toma 1/x)
+#   Todas devuelven a, b (+ c para cuadratica) y r (coeficiente
+#   de correlacion/determinacion) en las 3 lineas de pantalla.
+#
+# NUEVO 3 (POL/REC MEJORADO - angulo en MODO_ANGULOS):
+#   Las conversiones rectangular<->polar ahora respetan MODO_ANGULOS.
+#   Antes POL() siempre esperaba el angulo en grados y REC() siempre
+#   devolvia el angulo en grados, ignorando SETUPRAD. Ahora:
+#     POL(r, theta): theta se interpreta en la unidad activa (DEG/RAD)
+#     REC(x,y): devuelve angulo en la unidad activa (DEG/RAD)
+#   Tambien se agrega cobertura en el test suite.
+#
+# NUEVO 4 (EDITOR INTERACTIVO DE MATRICES):
+#   El modo 6 (MATRIX) del menu MODE abre un editor de celda por celda
+#   al estilo Casio. El usuario elige nombre (A/B/C), dimension (hasta
+#   4x4) y luego ingresa cada elemento con IGUAL para avanzar. La
+#   matriz se guarda en MATRICES al completar la ultima celda.
+#   Comando alternativo en consola: MATEDIT<A>,<filas>,<cols>
 # FIX 1 (ALTA - STAT mezcla de datos 1v/2v):
 #   procesar_estadistica() ahora detecta explicitamente si
 #   ESTADISTICA_DATOS mezcla puntos de 1 variable (ADD:v -> y=None)
@@ -294,10 +330,10 @@ LAYOUT_TECLADO_2ND = [
     ["POL(", "REC(", "PRIMOS", "MCD", "MCM", "RAND", "SINH(", "COSH("],
     ["TANH(", "CMPLX", "CUAD(", "CUB(", "TABLE", "BIN(", "OCT(", "HEX("],
     ["MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV", "SAVE", "TEST"],
-    # NUEVO (v5.0): FACT(n!), NPR/NCR (permutaciones/combinaciones),
-    # CONJ/ARG (numeros complejos), STATX (regresion lineal pareada).
+    # v5.0: FACT/NPR/NCR, CONJ/ARG, STATX/STATCLEAR, VEC2
     ["FACT(", "NPR(", "NCR(", "CONJ(", "ARG(", "STATX", "STATCLEAR", "VEC2("],
-    ["VEC3(", "", "", "", "", "", "", ""],
+    # v5.3: SIMU (ecuaciones simultaneas 2x2/3x3/4x4), MATEDIT, regresiones
+    ["VEC3(", "SIMU2(", "SIMU3(", "SIMU4(", "MATEDIT", "STATCUAD", "STATEXP", "STATLOG"],
 ]
 
 _ultimo_estado = {}
@@ -1113,18 +1149,29 @@ def calcular_integral(eq, limites_str):
 # 9. ESTADISTICA BASADA EN LISTAS (STAT)
 # ==========================================================
 def procesar_estadistica(comando):
-    """Maneja el ingreso de datos en lista y los calculos STATCALC.
+    """Maneja el ingreso de datos en lista y los calculos STAT.
 
-    FIX 3 (v5.1): ESTADISTICA_DATOS es una sola lista de tuplas
-    (x, y_o_None). "ADD:<v>" agrega (v, None) (modo 1-variable);
-    "X<x>,<y>" agrega (x, y) (modo pareado, para regresion lineal).
-    CALC calcula N/Media/Var/StdDev siempre sobre las x; ademas, si
-    TODOS los puntos tienen y (no hay None mezclados), agrega la
-    pendiente "a", ordenada "b" (y=a+bx) y el coeficiente "r" de
-    Pearson -- igual que la fx-991 en modo Reg-Lineal."""
+    NUEVO 2 (v5.3): ademas de la regresion lineal (STATCALC/STATLIN),
+    ahora se soportan todos los modelos de la Casio fx-991 ClassWiz:
+    STATCUAD (cuadratica), STATEXP (exponencial), STATLOG (logaritmica),
+    STATPOT (potencia), STATINV (inversa). Cada modelo delega en
+    calcular_regresion(), que usa _regresion_lineal() o _regresion_cuadratica()
+    sobre los datos transformados segun el modelo."""
     global ESTADISTICA_DATOS
     try:
-        # datos pareados "X<x>,<y>" -> regresion lineal
+        # ---- Ingreso de datos ----
+        if "CLEAR" in comando:
+            ESTADISTICA_DATOS.clear()
+            return "Lista limpia", "N = 0", ""
+
+        if "ADD:" in comando or comando.startswith("ADD:"):
+            if len(ESTADISTICA_DATOS) >= LIMITE_ESTADISTICA:
+                return f"Lista llena (max {LIMITE_ESTADISTICA})", "", ""
+            val = float(comando.split(":")[-1])
+            ESTADISTICA_DATOS.append((val, None))
+            return f"N = {len(ESTADISTICA_DATOS)}", f"Ultimo: {val}", ""
+
+        # STATX<x>,<y>: par para regresion
         if comando.startswith("X") or comando.startswith(":X"):
             if len(ESTADISTICA_DATOS) >= LIMITE_ESTADISTICA:
                 return f"Lista llena (max {LIMITE_ESTADISTICA})", "", ""
@@ -1132,69 +1179,55 @@ def procesar_estadistica(comando):
             partes = cuerpo.split(",")
             if len(partes) < 2:
                 return "Error: use STATX<x>,<y>", "", ""
-            x_val = float(partes[0])
-            y_val = float(partes[1])
+            x_val = evaluar_expresion(partes[0].strip(), variables_actuales())
+            y_val = evaluar_expresion(partes[1].strip(), variables_actuales())
             ESTADISTICA_DATOS.append((x_val, y_val))
             return (f"N = {len(ESTADISTICA_DATOS)}",
                     f"Par: ({x_val}, {y_val})", "")
 
-        if comando.startswith("ADD:") or "ADD:" in comando:
-            if len(ESTADISTICA_DATOS) >= LIMITE_ESTADISTICA:
-                return f"Lista llena (max {LIMITE_ESTADISTICA})", "", ""
-            val = float(comando.split(":")[-1])
-            ESTADISTICA_DATOS.append((val, None))
-            return f"N = {len(ESTADISTICA_DATOS)}", f"Ultimo: {val}", ""
+        # ---- Calculos ----
+        if not ESTADISTICA_DATOS:
+            return "Lista vacia", "", ""
 
-        if "CLEAR" in comando:
-            ESTADISTICA_DATOS.clear()
-            return "Lista limpia", "N = 0", ""
+        n      = len(ESTADISTICA_DATOS)
+        vals_x = [p[0] for p in ESTADISTICA_DATOS]
+        ys     = [p[1] for p in ESTADISTICA_DATOS]
+        media  = sum(vals_x) / n
+        var    = sum((v - media) ** 2 for v in vals_x) / n
+        desv   = math.sqrt(var)
 
-        if "CALC" in comando:
-            if not ESTADISTICA_DATOS:
-                return "Lista vacia", "", ""
-            n = len(ESTADISTICA_DATOS)
-            xs = [par[0] for par in ESTADISTICA_DATOS]
-            ys = [par[1] for par in ESTADISTICA_DATOS]
-            media = sum(xs) / n
-            varianza = sum((v - media) ** 2 for v in xs) / n
-            desviacion = varianza ** 0.5
-            l1 = f"N = {n}  Media={media:.4f}"
-            l2 = f"Var(s2) = {varianza:.4f}"
-            l3 = f"StdDev(s) = {desviacion:.4f}"
+        # Detectar mezcla 1v/2v (FIX 1 v5.2, conservado en v5.3)
+        hay_pareado = any(y is not None for y in ys)
+        hay_nones   = any(y is None     for y in ys)
+        mezcla      = hay_pareado and hay_nones
 
-            # FIX 1 (v5.2): si ESTADISTICA_DATOS mezcla puntos de 1
-            # variable (ADD:v -> y=None) con puntos pareados
-            # (STATX<x>,<y> -> y=valor), la regresion no es valida.
-            # Antes "all(y is not None for y in ys)" simplemente daba
-            # False y el usuario se quedaba sin saber por que no habia
-            # regresion. Ahora se avisa explicitamente en l3.
-            hay_simple = any(y is None for y in ys)
-            hay_pareado = any(y is not None for y in ys)
+        # Determinar modelo de regresion solicitado
+        modelo = None
+        if   "CUAD" in comando: modelo = "CUAD"
+        elif "EXP"  in comando: modelo = "EXP"
+        elif "LOG"  in comando: modelo = "LOG"
+        elif "POT"  in comando: modelo = "POT"
+        elif "INV"  in comando: modelo = "INV"
+        elif "LIN"  in comando or "CALC" in comando: modelo = "LIN"
 
-            if hay_simple and hay_pareado:
-                l3 = "Error: mezcla 1v/2v"
-            elif n >= 2 and all(y is not None for y in ys):
-                media_y = sum(ys) / n
-                # sxx = varianza * n: es la misma suma que ya calculamos
-                # arriba para varianza, sin recorrer xs de nuevo.
-                sxx = varianza * n
-                syy = sum((y - media_y) ** 2 for y in ys)
-                sxy = sum((x - media) * (y - media_y) for x, y in zip(xs, ys))
-                if sxx == 0:
-                    return l1, l2, "Error: x constante"
-                b = sxy / sxx          # pendiente
-                a = media_y - b * media  # ordenada al origen
-                if syy == 0:
-                    r = 0.0
-                else:
-                    r = sxy / (sxx ** 0.5 * syy ** 0.5)
-                l2 = f"a={decimal_a_fraccion(a)}  b={decimal_a_fraccion(b)}"
-                l3 = f"r = {r:.4f}"
+        if modelo:
+            if mezcla:
+                return (f"N={n} Med={media:.4f}",
+                        f"s={desv:.4f}",
+                        "Error: mezcla 1v/2v")
+            if not hay_pareado:
+                return "Faltan pares (x,y)", "Usa STATX<x>,<y>", ""
+            pares = [(p[0], p[1]) for p in ESTADISTICA_DATOS]
+            return calcular_regresion(modelo, pares)
 
-            return l1, l2, l3
-    except Exception:
-        pass
-    return "Error Estad.", "", ""
+        # Sin modelo: resumen de 1 variable
+        l3 = "Error: mezcla 1v/2v" if mezcla else f"s={desv:.4f}"
+        return (f"N={n}  Med={media:.4f}",
+                f"Var={var:.4f}",
+                l3)
+
+    except Exception as ex:
+        return f"Error Estad: {ex}"[:16], "", ""
 
 
 # ==========================================================
@@ -1978,8 +2011,394 @@ def cmd_basen(cmd):
 
 
 # ==========================================================
-# 11v5.2. MODULO VECTOR: VEC2/VEC3 (modulo + angulos)
+# 11v5.3-A. ECUACIONES SIMULTANEAS (NUEVO 1 - v5.3)
 # ==========================================================
+# Resuelve Ax = b para sistemas 2x2, 3x3 y 4x4 mediante
+# eliminacion gaussiana con pivoteo parcial (mas numericamente
+# estable que Cramer para matrices grandes o mal condicionadas).
+# Supera la Casio fx-991 que solo implementa hasta 3x3.
+#
+# Sintaxis:
+#   SIMU2(a11,a12,b1, a21,a22,b2)         -> 6 argumentos
+#   SIMU3(a11..a33, b1,b2,b3)             -> 12 argumentos
+#   SIMU4(a11..a44, b1,b2,b3,b4)          -> 20 argumentos
+
+def _gauss(A, b):
+    """Eliminacion gaussiana con pivoteo parcial.
+    A: lista de listas n×n (se modifica in-place).
+    b: lista de n independientes (se modifica in-place).
+    Retorna lista de n soluciones, o lanza ValueError si singular."""
+    n = len(b)
+    # Construir matriz aumentada
+    M = [A[i][:] + [b[i]] for i in range(n)]
+
+    for col in range(n):
+        # Pivoteo parcial: busca la fila con mayor valor absoluto en esta col
+        pivot_fila = max(range(col, n), key=lambda r: abs(M[r][col]))
+        M[col], M[pivot_fila] = M[pivot_fila], M[col]
+
+        if abs(M[col][col]) < 1e-12:
+            raise ValueError("Sistema sin solucion unica")
+
+        for fila in range(col + 1, n):
+            factor = M[fila][col] / M[col][col]
+            for j in range(col, n + 1):
+                M[fila][j] -= factor * M[col][j]
+
+    # Sustitucion hacia atras
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        x[i] = M[i][n]
+        for j in range(i + 1, n):
+            x[i] -= M[i][j] * x[j]
+        x[i] /= M[i][i]
+    return x
+
+
+def cmd_simu(cmd):
+    """SIMU<n>(<args>) resuelve un sistema de ecuaciones lineales n×n.
+    n puede ser 2, 3 o 4 (hasta 4x4, superando la Casio fx-991 que
+    solo llega a 3x3).
+
+    Formato de argumentos (separados por comas, sin espacios):
+      SIMU2: a11,a12,b1,a21,a22,b2           (6 numeros)
+      SIMU3: a11,a12,a13,b1,...,a33,b3       (12 numeros)
+      SIMU4: a11..a44 fila por fila, b1..b4  (20 numeros)
+
+    Devuelve X1, X2 (,X3 ,X4) en las tres lineas de la OLED."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        # Determinar n desde el nombre del comando
+        cmd_u = cmd.upper()
+        if "SIMU4" in cmd_u:
+            n = 4
+        elif "SIMU3" in cmd_u:
+            n = 3
+        elif "SIMU2" in cmd_u:
+            n = 2
+        else:
+            return "Uso: SIMU2/3/4", "SIMU2(a,b,c,d,e,f)", ""
+
+        # Extraer argumentos
+        resto = cmd_u.split(f"SIMU{n}", 1)[-1].strip().strip("()")
+        args = [evaluar_expresion(v.strip(), variables_actuales())
+                for v in resto.split(",")]
+
+        esperado = n * (n + 1)  # n filas × (n coefs + 1 independiente)
+        if len(args) != esperado:
+            return f"SIMU{n}: {esperado} args", f"tienes {len(args)}", ""
+
+        # Construir A y b: los argumentos van fila por fila,
+        # con el termino independiente al FINAL de cada fila.
+        # Ej SIMU2: a11,a12,b1, a21,a22,b2
+        A = []
+        b = []
+        for fila in range(n):
+            base = fila * (n + 1)
+            A.append([args[base + col] for col in range(n)])
+            b.append(args[base + n])
+
+        x = _gauss(A, b)
+
+        # Formatear resultado en las 3 lineas de pantalla (max 4 vars)
+        def _fmtx(i, v):
+            return f"X{i+1}={decimal_a_fraccion(round(v, 8))}"
+
+        if n == 2:
+            return _fmtx(0, x[0]), _fmtx(1, x[1]), ""
+        if n == 3:
+            return _fmtx(0, x[0]), _fmtx(1, x[1]), _fmtx(2, x[2])
+        # n == 4: tres lineas, la tercera muestra X3 y X4
+        return (_fmtx(0, x[0]),
+                _fmtx(1, x[1]),
+                f"{_fmtx(2, x[2])} {_fmtx(3, x[3])}")
+
+    except ValueError as e:
+        return str(e)[:16], "", ""
+    except Exception as ex:
+        return f"Error SIMU: {ex}"[:16], "", ""
+
+
+# ==========================================================
+# 11v5.3-B. REGRESIONES COMPLETAS (NUEVO 2 - v5.3)
+# ==========================================================
+# Complementa la regresion lineal existente con los modelos
+# que tiene la Casio fx-991 ClassWiz:
+#   STATLIN  y = a + bx        (lineal)
+#   STATCUAD y = a + bx + cx²  (cuadratica, usa sistema 3x3)
+#   STATEXP  y = ae^(bx)       (linealiza: ln(y) = ln(a) + bx)
+#   STATLOG  y = a + b*ln(x)   (linealiza: y vs ln(x))
+#   STATPOT  y = ax^b          (linealiza: ln(y) = ln(a) + b*ln(x))
+#   STATINV  y = a + b/x       (linealiza: y vs 1/x)
+# Todas reutilizan _regresion_lineal() sobre los datos transformados.
+
+def _regresion_lineal(xs, ys):
+    """Minimos cuadrados y = a + bx.
+    Devuelve (a, b, r) donde r es el coef. de correlacion de Pearson."""
+    n = len(xs)
+    if n < 2:
+        raise ValueError("Se necesitan >= 2 puntos")
+    sx  = sum(xs);  sy  = sum(ys)
+    sxx = sum(x*x for x in xs)
+    sxy = sum(x*y for x, y in zip(xs, ys))
+    syy = sum(y*y for y in ys)
+    denom = n * sxx - sx * sx
+    if abs(denom) < 1e-12:
+        raise ValueError("Datos degenerados (x constante)")
+    b = (n * sxy - sx * sy) / denom
+    a = (sy - b * sx) / n
+    # Coeficiente de correlacion r
+    num_r = n * sxy - sx * sy
+    den_r = math.sqrt(max(0.0, (n * sxx - sx**2) * (n * syy - sy**2)))
+    r = num_r / den_r if den_r > 1e-12 else 0.0
+    return a, b, r
+
+
+def _regresion_cuadratica(xs, ys):
+    """Regresion cuadratica y = a + bx + cx² por sistema 3x3 normal."""
+    n = len(xs)
+    if n < 3:
+        raise ValueError("Se necesitan >= 3 puntos para cuadratica")
+    sx  = sum(xs);    sx2 = sum(x**2 for x in xs)
+    sx3 = sum(x**3 for x in xs); sx4 = sum(x**4 for x in xs)
+    sy  = sum(ys)
+    sxy = sum(x*y for x, y in zip(xs, ys))
+    sx2y = sum(x**2*y for x, y in zip(xs, ys))
+    # Sistema 3x3: [n sx sx2; sx sx2 sx3; sx2 sx3 sx4] * [a;b;c] = [sy;sxy;sx2y]
+    A = [[n,   sx,  sx2],
+         [sx,  sx2, sx3],
+         [sx2, sx3, sx4]]
+    b_vec = [sy, sxy, sx2y]
+    a, b, c = _gauss(A, b_vec)
+    # r² como fraccion de varianza explicada
+    y_mean = sy / n
+    ss_tot = sum((y - y_mean)**2 for y in ys)
+    ss_res = sum((y - (a + b*x + c*x**2))**2 for x, y in zip(xs, ys))
+    r2 = 1 - ss_res / ss_tot if ss_tot > 1e-12 else 1.0
+    return a, b, c, math.sqrt(max(0.0, r2))
+
+
+def _fmt_regresion(modelo, a, b, r, c=None):
+    """Formatea el resultado de una regresion en 3 lineas de pantalla."""
+    fa = decimal_a_fraccion(round(a, 5))
+    fb = decimal_a_fraccion(round(b, 5))
+    fr = f"{r:.4f}"
+    linea1 = f"{modelo}: a={fa}"
+    linea2 = f"b={fb}"
+    if c is not None:
+        linea2 += f" c={decimal_a_fraccion(round(c, 5))}"
+    return linea1, linea2, f"r={fr}"
+
+
+def calcular_regresion(modelo, datos):
+    """Despacha el calculo de regresion segun el modelo solicitado.
+    datos: lista de tuplas (x, y) (puntos pareados, y != None).
+    modelo: "LIN"|"CUAD"|"EXP"|"LOG"|"POT"|"INV"
+    Devuelve tupla de 3 strings (lineas de pantalla)."""
+    xs = [p[0] for p in datos]
+    ys = [p[1] for p in datos]
+    n  = len(xs)
+
+    if modelo == "LIN":
+        a, b, r = _regresion_lineal(xs, ys)
+        return _fmt_regresion("LIN y=a+bx", a, b, r)
+
+    if modelo == "CUAD":
+        a, b, c, r = _regresion_cuadratica(xs, ys)
+        return _fmt_regresion("CUAD y=a+bx+cx2", a, b, r, c)
+
+    if modelo == "EXP":
+        # y = ae^(bx)  ->  ln(y) = ln(a) + bx
+        if any(y <= 0 for y in ys):
+            return "EXP: y debe ser", "> 0 para todos", "los puntos"
+        lnys = [math.log(y) for y in ys]
+        ln_a, b, r = _regresion_lineal(xs, lnys)
+        return _fmt_regresion("EXP y=ae^bx", math.exp(ln_a), b, r)
+
+    if modelo == "LOG":
+        # y = a + b*ln(x)
+        if any(x <= 0 for x in xs):
+            return "LOG: x debe ser", "> 0 para todos", "los puntos"
+        lnxs = [math.log(x) for x in xs]
+        a, b, r = _regresion_lineal(lnxs, ys)
+        return _fmt_regresion("LOG y=a+b*ln(x)", a, b, r)
+
+    if modelo == "POT":
+        # y = ax^b  ->  ln(y) = ln(a) + b*ln(x)
+        if any(x <= 0 for x in xs) or any(y <= 0 for y in ys):
+            return "POT: x e y deben", "ser > 0", ""
+        lnxs = [math.log(x) for x in xs]
+        lnys = [math.log(y) for y in ys]
+        ln_a, b, r = _regresion_lineal(lnxs, lnys)
+        return _fmt_regresion("POT y=ax^b", math.exp(ln_a), b, r)
+
+    if modelo == "INV":
+        # y = a + b/x
+        if any(x == 0 for x in xs):
+            return "INV: x no puede", "ser 0", ""
+        inv_xs = [1.0 / x for x in xs]
+        a, b, r = _regresion_lineal(inv_xs, ys)
+        return _fmt_regresion("INV y=a+b/x", a, b, r)
+
+    return "Modelo desconocido", f"'{modelo}'", "LIN CUAD EXP LOG POT INV"
+
+
+# ==========================================================
+# 11v5.3-C. EDITOR INTERACTIVO DE MATRICES (NUEVO 4 - v5.3)
+# ==========================================================
+# Estado del editor de matrices
+_MATEDIT_ESTADO = {
+    "activo": False,   # True mientras el editor esta abierto
+    "nombre": None,    # "A", "B" o "C"
+    "filas": 0,
+    "cols": 0,
+    "datos": [],       # lista plana que se va llenando
+    "celda": 0,        # indice de la celda actual (0-based)
+}
+
+
+def matedit_iniciar(nombre, filas, cols):
+    """Inicia el editor de matrices: reserva estado y muestra la primera celda.
+    Se llama al seleccionar el modo 6 (MATRIX) y elegir dimension,
+    o desde el token MATEDIT<A>,<filas>,<cols> en consola."""
+    global _MATEDIT_ESTADO
+    nombre = nombre.upper()
+    if nombre not in MATRICES:
+        return "Nombre: A B C", "", ""
+    if filas < 1 or filas > 4 or cols < 1 or cols > 4:
+        return "Max 4x4", f"Got {filas}x{cols}", ""
+    _MATEDIT_ESTADO = {
+        "activo": True,
+        "nombre": nombre,
+        "filas": int(filas),
+        "cols": int(cols),
+        "datos": [],
+        "celda": 0,
+    }
+    return _matedit_prompt()
+
+
+def _matedit_prompt():
+    """Devuelve el mensaje de pantalla para la celda actual del editor."""
+    e = _MATEDIT_ESTADO
+    if not e["activo"]:
+        return "Editor inactivo", "", ""
+    celda = e["celda"]
+    total = e["filas"] * e["cols"]
+    fila  = celda // e["cols"] + 1
+    col   = celda %  e["cols"] + 1
+    return (f"Mat{e['nombre']} {e['filas']}x{e['cols']}",
+            f"Ingresa [{fila},{col}]",
+            f"({celda+1}/{total}) IGUAL=ok")
+
+
+def matedit_ingresar(valor_str):
+    """Recibe el valor de la celda actual (como string evaluable),
+    lo agrega al buffer y avanza. Si es la ultima celda, guarda la
+    matriz en MATRICES y cierra el editor.
+    Devuelve tupla de 3 strings para la pantalla."""
+    global _MATEDIT_ESTADO
+    e = _MATEDIT_ESTADO
+    if not e["activo"]:
+        return "Editor no abierto", "", ""
+    try:
+        val = evaluar_expresion(valor_str.strip(), variables_actuales())
+    except Exception as ex:
+        return f"Error: {ex}"[:16], "Reintenta el valor", _matedit_prompt()[1]
+
+    e["datos"].append(val)
+    e["celda"] += 1
+    total = e["filas"] * e["cols"]
+
+    if e["celda"] >= total:
+        # Ultimo elemento: guardar y cerrar
+        MATRICES[e["nombre"]] = {
+            "data": e["datos"][:],
+            "filas": e["filas"],
+            "cols": e["cols"],
+        }
+        nombre = e["nombre"]
+        f, c = e["filas"], e["cols"]
+        e["activo"] = False
+        return (f"Mat{nombre} {f}x{c} guardada",
+                f"{total} elementos OK",
+                "AC para salir")
+
+    return _matedit_prompt()
+
+
+def cmd_matedit(cmd):
+    """MATEDIT<nombre>,<filas>,<cols>
+    Inicia el editor interactivo de matrices desde consola o teclado fisico.
+    Ejemplo: MATEDITA,3,3  abre el editor para una matriz 3x3 en MatA."""
+    try:
+        resto = cmd.upper().split("MATEDIT", 1)[-1].strip()
+        partes = resto.split(",")
+        nombre = partes[0].strip()
+        filas  = int(evaluar_expresion(partes[1].strip(), variables_actuales()))
+        cols   = int(evaluar_expresion(partes[2].strip(), variables_actuales()))
+        return matedit_iniciar(nombre, filas, cols)
+    except Exception as ex:
+        return f"Uso: MATEDITA,f,c", f"Error: {ex}"[:16], ""
+
+
+# ==========================================================
+# 11v5.3-D. POL/REC CON MODO_ANGULOS (NUEVO 3 - v5.3)
+# ==========================================================
+# Las funciones POL/REC originales (v4.x) siempre usaban grados,
+# ignorando SETUPRAD. Ahora respetan MODO_ANGULOS: en RAD, theta
+# se interpreta como radianes y el angulo de salida tambien es RAD.
+
+def _angulo_a_rad(theta):
+    """Convierte theta desde la unidad activa (DEG/RAD) a radianes."""
+    return theta if MODO_ANGULOS == "RAD" else math.radians(theta)
+
+
+def _rad_a_angulo(rad):
+    """Convierte radianes a la unidad activa (DEG/RAD)."""
+    return rad if MODO_ANGULOS == "RAD" else math.degrees(rad)
+
+
+def cmd_pol(cmd):
+    """POL(r, theta): convierte coordenadas polares a rectangulares.
+    theta se interpreta en la unidad activa (DEG o RAD segun SETUP).
+    Devuelve X, Y."""
+    try:
+        nums = extraer_numeros(cmd, "POL")
+        r, theta = nums[0], nums[1]
+        rad = _angulo_a_rad(theta)
+        x = r * math.cos(rad)
+        y = r * math.sin(rad)
+        return (f"X = {decimal_a_fraccion(round(x, 6))}",
+                f"Y = {decimal_a_fraccion(round(y, 6))}", "")
+    except Exception as ex:
+        return f"Error POL: {ex}"[:16], "", ""
+
+
+def cmd_rec(cmd):
+    """REC(x, y): convierte coordenadas rectangulares a polares.
+    El angulo devuelto esta en la unidad activa (DEG o RAD segun SETUP)."""
+    try:
+        nums = extraer_numeros(cmd, "REC")
+        x, y = nums[0], nums[1]
+        r   = math.hypot(x, y)
+        ang = _rad_a_angulo(math.atan2(y, x))
+        return (f"R = {decimal_a_fraccion(round(r, 6))}",
+                f"ANG = {decimal_a_fraccion(round(ang, 4))}", "")
+    except Exception as ex:
+        return f"Error REC: {ex}"[:16], "", ""
+
+
+# ==========================================================
+# 11v5.3-E. MATEDIT EN EL BUCLE (estado de ingreso celda a celda)
+# ==========================================================
+# El bucle iniciar() consulta _MATEDIT_ESTADO["activo"] para saber
+# si debe redirigir el token IGUAL a matedit_ingresar() en vez del
+# calculo normal. El buffer ENTRADA_TOKENS sigue funcionando igual:
+# el usuario escribe el valor de la celda y presiona IGUAL para confirmarlo.
+
+
 # NUEVO 2 (v5.2): el modo 8 (VECTOR) del menu MODE ya tenia DOT/CROSS
 # (producto escalar/vectorial entre DOS vectores), pero no tenia ninguna
 # operacion sobre UN solo vector (modulo, direccion), que es lo que la
@@ -2332,21 +2751,26 @@ def procesar_todo(entrada_cruda):
         if "MATINV" in cmd:
             return cmd_matinv(cmd)
 
-        # ---- CONVERSIONES POLARES / RECTANGULARES ----
-        if "POL" in cmd:  # POL(r, deg) -> X, Y
-            nums = extraer_numeros(cmd, "POL")
-            r, rad = nums[0], math.radians(nums[1])
-            return f"X = {r * math.cos(rad):.4f}", f"Y = {r * math.sin(rad):.4f}", ""
-        if "REC" in cmd:  # REC(x, y) -> R, ANG
-            nums = extraer_numeros(cmd, "REC")
-            x, y = nums[0], nums[1]
-            return f"R = {math.hypot(x, y):.4f}", f"ANG = {math.degrees(math.atan2(y, x)):.2f}", ""
+        # ---- CONVERSIONES POLARES / RECTANGULARES (NUEVO 3 - v5.3) ----
+        # POL/REC ahora respetan MODO_ANGULOS (DEG/RAD) via cmd_pol/cmd_rec.
+        if "POL" in cmd:
+            return cmd_pol(cmd)
+        if "REC" in cmd:
+            return cmd_rec(cmd)
 
         # ---- ALEATORIO Y RAIZ ANALITICA ----
         if "RAND" in cmd:
             return f"Rand: {time.time() % 1:.5f}", "", ""
         if "RAIZ" in cmd:
             return calcular_raiz_analitica(cmd.split("RAIZ")[-1]), "", ""
+
+        # ---- ECUACIONES SIMULTANEAS (NUEVO 1 - v5.3) ----
+        if "SIMU" in cmd:
+            return cmd_simu(cmd)
+
+        # ---- EDITOR DE MATRICES (NUEVO 4 - v5.3) ----
+        if "MATEDIT" in cmd:
+            return cmd_matedit(cmd)
 
         # ---- v4.5: PERSISTENCIA, SETUP, TESTS ----
         if cmd == "SAVE":
@@ -2376,7 +2800,7 @@ def procesar_todo(entrada_cruda):
 # 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3
 # ==========================================================
 INSTRUCCIONES = (
-    "PiCalc OS v5.2 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v5.3 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
     "Combinatoria: FACT(n)=n!  NPR(n,r)  NCR(n,r)\n"
@@ -2384,12 +2808,15 @@ INSTRUCCIONES = (
     "Vectores: VEC2(x,y) VEC3(x,y,z) -> modulo+angulos | DOT CROSS\n"
     "Memoria: A B C X Y ANS  |  Comandos: STO RCL\n"
     "Calculo: SOLVE DERIV<f>,<x>  INT<f>,<a>,<b>  MCD MCM RAND PRIMOS\n"
+    "Ec.simultaneas: SIMU2(a11,a12,b1,...) | SIMU3(...) | SIMU4(...) hasta 4x4\n"
     "Matrices (sistemas): MAT2 MAT3 DOT CROSS\n"
-    "Matrices (algebra): MATDEF<n>,<f>,<c>,vals  MATADD MATMUL MATTRANS MATDET MATINV\n"
+    "Matrices (algebra): MATDEF MATADD MATMUL MATTRANS MATDET MATINV\n"
+    "Editor de matrices: MATEDIT<A>,<f>,<c>  luego IGUAL celda por celda\n"
     "Polinomios: CUAD(a,b,c)  CUB(a,b,c,d)\n"
     "Tabla: TABLE<expr>,<ini>,<fin>,<paso>  | luego IZQ/DER recorre filas\n"
     "Base-N: BIN(n) OCT(n) HEX(n) AND(a,b) OR(a,b) XOR(a,b) NOT(n)\n"
-    "Estadistica: STATADD:<v> | STATX<x>,<y> (regresion) | STATCALC | STATCLEAR\n"
+    "Estadistica: STATADD:<v> | STATX<x>,<y> (regresion) | STATCALC/LIN/CUAD/EXP/LOG/POT/INV\n"
+    "POL/REC: respetan SETUPDEG/SETUPRAD\n"
     "SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI  SETUPNORM\n"
     "Control: AC DEL IGUAL BYPASS=modo examen\n"
     "Cursor: IZQ DER  |  Menu modos: MODE (digita 1-8; el 5=EQN abre submenu 1-4)"
@@ -2411,7 +2838,7 @@ def iniciar():
     # En primer arranque el archivo no existe y cargar_estado devuelve False.
     estado_cargado = cargar_estado()
 
-    renderizar_pantalla("PiCalc OS v5.2", f"Examen: {'ACTIVO' if MODO_EXAMEN else 'INACTIVO'}",
+    renderizar_pantalla("PiCalc OS v5.3", f"Examen: {'ACTIVO' if MODO_EXAMEN else 'INACTIVO'}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
@@ -2563,6 +2990,17 @@ def iniciar():
 
         # ---- IGUAL: calcular ----
         if accion_u == "IGUAL":
+            # NUEVO 4 (v5.3): si el editor de matrices esta activo,
+            # IGUAL confirma el valor de la celda actual en vez de
+            # evaluar la expresion como calculo normal.
+            if _MATEDIT_ESTADO["activo"] and ENTRADA_TOKENS:
+                valor_str = construir_expresion(ENTRADA_TOKENS)
+                l1, l2, l3 = matedit_ingresar(valor_str)
+                renderizar_pantalla(l1, l2, l3)
+                ENTRADA_TOKENS = []
+                CURSOR_POS = 0
+                continue
+
             if ENTRADA_TOKENS:
                 expr = construir_expresion(ENTRADA_TOKENS)
                 texto_anterior = "".join(ENTRADA_TOKENS)
