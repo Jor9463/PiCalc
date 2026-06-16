@@ -125,6 +125,10 @@ El firmware ha evolucionado a través de dos grandes etapas: la etapa de **Simul
 * **picalc_os_v5.3 (Recolección Automática de Basura en el Bucle Principal):**
     * **RECOLECCIÓN AUTOMÁTICA EN INICIAR():** Se integraron llamadas estratégicas a `gc.collect()` directamente dentro del bucle de eventos principal (`iniciar()`). El sistema ahora fuerza la liberación instantánea de bloques de RAM huérfanos cada vez que se procesa una expresión con la tecla `IGUAL` o se limpia el búfer de entrada con la tecla `AC`.
     * **MITIGACIÓN DE LA FRAGMENTACIÓN DEL HEAP:** Esta rutina pasiva asegura que la memoria dinámica de la Raspberry Pi Pico se desfragmente de forma continua durante el uso cotidiano, eliminando los residuos que dejan atrás los cálculos pesados en los modos `MATRIX`, `STAT` y `TABLE` antes de que puedan provocar un desborde.
+* **picalc_os_v5.4 (Editor de Matrices Interactivo y Entorno Gráfico OLED):**
+    * **NUEVO EDITOR INTERACTIVO DE MATRICES (`MATRIX EDIT`):** Implementación de un entorno de edición visual para el modo de cálculo matricial gestionado por el estado `_MATEDIT_ESTADO`. Permite al usuario seleccionar dimensiones (de 1x1 hasta 4x4) y editar cada celda individualmente moviéndose con el cursor físico en pantalla.
+    * **RUTINAS GRÁFICAS DE COMPORTAMIENTO CASIO:** Integración de las funciones `matedit_abrir()`, `matedit_ingresar()` y `matedit_renderizar()`. El sistema dibuja la cuadrícula de la matriz elegida en la OLED, resalta la celda activa, previsualiza el valor actual y procesa la inserción de nuevas expresiones matemáticas dentro de la celda al presionar la tecla `IGUAL`.
+    * **CONTROL DE PARSEO DE CELDAS:** Se enlazó el editor dinámico con el motor parser de la calculadora. Al confirmar un ingreso en una celda, el buffer `ENTRADA_TOKENS` es evaluado por el sistema, traduciendo variables o constantes antes de inyectar el valor numérico final en la matriz interna (`MatA`, `MatB` o `MatC`).
     * 
 ---
 
