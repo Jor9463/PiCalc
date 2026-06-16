@@ -1,219 +1,15 @@
+# PiCalc OS v5.3  |  github.com/picalc
+# Motor RPN/Shunting-Yard, sin eval(). Dual PC/Pico (RP2040 + OLED SH1106).
+# Requiere: sh1106.py en la Pico. En PC corre directo con CPython >= 3.9.
+# SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI<n>  SETUPNORM
+# Modos (MODE): 1COMP 2CMPLX 3STAT 4BASE-N 5EQN 6MATRIX 7TABLE 8VECTOR
+
 import time
 import math
 import cmath
 import json  # persistencia en flash (Pico usa ujson; mismo API)
 
-# ==========================================================
-# PiCalc OS v5.0  –  Changelog desde v4.5
-# ----------------------------------------------------------
-# NUEVO 1 (FACT/NPR/NCR - CRITICO):
-#   Se agregan FACT(n) (n!), NPR(n,r) (permutaciones) y
-#   NCR(n,r) (combinaciones) como funciones de teclado (capa 2ND).
-#   FACT acepta enteros no negativos hasta 170 (limite de float
-#   antes de overflow). NPR/NCR validan 0<=r<=n.
-#
-# NUEVO 2 (CONJ/ARG en CMPLX):
-#   CONJ(a+bi) devuelve el conjugado a-bi. ARG(a+bi) devuelve el
-#   angulo (en DEG o RAD segun MODO_ANGULOS) del numero complejo.
-#   Ambas solo tienen sentido con MODO_COMPLEJO activo; si se
-#   usan sobre un real, ARG da 0 y CONJ da el mismo numero.
-#
-# NUEVO 3 (SETUP completo: FIX/SCI/NORM + RAD real):
-#   - FIX 0 (V4.5 BUG): MODO_ANGULOS="RAD" se guardaba pero NUNCA
-#     se usaba en evaluar_rpn(), que siempre convertia grados<->rad
-#     sin importar el modo. Ahora SIN/COS/TAN/ASIN/ACOS/ATAN
-#     respetan MODO_ANGULOS=DEG/RAD (en RAD no se hace conversion).
-#   - SETUPFIX<n> fija decimales (FIX 0-9). SETUPSCI activa
-#     notacion cientifica. SETUPNORM vuelve al formato automatico
-#     (fracciones + 5 decimales, comportamiento v4.x). Estos
-#     formatos se aplican en decimal_a_fraccion() para numeros
-#     reales (no afectan fracciones exactas en NORM).
-#
-# NUEVO 4 (STAT con regresion lineal):
-#   STATX<x>,<y> agrega un par (x,y) a dos listas paralelas.
-#   STATCALC ahora, si hay datos pareados, ademas de N/Media/Var
-#   devuelve "a=...  b=..." (y=a+bx) y el coeficiente "r=...".
-#   STATCLEAR limpia ambas listas. El modo de 1 variable (ADD:v)
-#   sigue funcionando igual que en v4.5.
-# ==========================================================
-# ==========================================================
-# PiCalc OS v5.1  –  Changelog desde v5.0 (revision de codigo)
-# ----------------------------------------------------------
-# FIX 1 (CRITICO - persistencia incompleta de SETUP):
-#   guardar_estado()/cargar_estado() ahora incluyen MODO_ANGULOS,
-#   FORMATO_NUM y FORMATO_DECIMALES. Antes, SETUPRAD/SETUPFIX se
-#   perdian al reiniciar la Pico y volvian siempre a DEG/NORM.
-#   Se valida el valor cargado (DEG/RAD, NORM/FIX/SCI, 0-9) por si
-#   el archivo de estado fue editado a mano o quedo corrupto.
-#
-# FIX 2 (ALTA - FUNC_MAP mas legible):
-#   Las entradas de FUNC_MAP eran tuplas (fn, modo) donde "modo"
-#   mezclaba dos conceptos: conversion angular ("deg_in"/"deg_out")
-#   y manejo especial ("fact"/"cplx_conj"/"cplx_arg"). Ahora cada
-#   entrada es un dict {"fn":..., "angulo": "in"/"out"/None,
-#   "especial": None/"fact"/"conj"/"arg"}, documentado por bloques
-#   (trig directa, trig inversa, sin angulo, especiales). La logica
-#   en evaluar_rpn() es la misma, pero mas facil de seguir/extender.
-#
-# FIX 3 (ALTA - listas paralelas de STAT fusionadas):
-#   ESTADISTICA_LISTA + ESTADISTICA_LISTA_Y (siempre del mismo largo
-#   o la segunda vacia) se reemplazan por ESTADISTICA_DATOS: una
-#   sola lista de tuplas (x, y_o_None). STATADD guarda (v, None);
-#   STATX guarda (x, y). CALC usa regresion solo si TODOS los puntos
-#   tienen y. Tambien se evita recalcular sxx desde cero: sxx =
-#   varianza * n (son la misma suma).
-#
-# FIX 4 (MEDIA - SETUPFIX/SETUPSCI con 2+ digitos):
-#   "SETUPFIX10" antes tomaba solo el primer caracter ("1") y
-#   fijaba FIX 1. Ahora _parsear_decimales() lee TODOS los digitos
-#   consecutivos ("10"), y luego recorta al rango valido 0-9 (-> 9).
-#
-# FIX 5 (MEDIA - NaN/Inf en decimal_a_fraccion):
-#   Valores no finitos (float('nan')/inf) que llegaran desde SOLVE,
-#   regresion con datos degenerados, etc. ahora devuelven
-#   "Error: NaN" / "Error: Inf" / "Error: -Inf" en vez de las
-#   cadenas poco claras "nan"/"inf"/"-inf" que producia format().
-# ==========================================================
-# ==========================================================
-# PiCalc OS v5.3  –  Changelog desde v5.2
-# ----------------------------------------------------------
-# NUEVO 1 (ECUACIONES SIMULTANEAS 2x2/3x3/4x4):
-#   cmd_simu() resuelve sistemas de ecuaciones lineales de hasta
-#   4x4 mediante eliminacion gaussiana con pivoteo parcial. La
-#   sintaxis unificada es SIMU<n>(<a11>,<a12>,...,<b1>,...):
-#   SIMU2(a,b,c,d,e,f) -> Ax=b con A=[[a,b],[c,d]], b=[e,f]
-#   SIMU3(...9 coefs...,3 independ.) -> sistema 3x3
-#   SIMU4(...16 coefs...,4 independ.) -> sistema 4x4
-#   Detecta sistema sin solucion unica (det~0) y lo informa.
-#   Supera la Casio fx-991 que solo llega a 3x3.
-#
-# NUEVO 2 (REGRESIONES COMPLETAS - STAT):
-#   procesar_estadistica() ahora soporta todos los modelos de
-#   regresion de la fx-991 ClassWiz:
-#   STATLIN  -> y = a + bx   (lineal, ya existia)
-#   STATCUAD -> y = a + bx + cx^2 (cuadratica por minimos cuadrados)
-#   STATEXP  -> y = ae^(bx)  (exponencial, toma ln(y))
-#   STATLOG  -> y = a + b*ln(x) (logaritmica, toma ln(x))
-#   STATPOT  -> y = ax^b     (potencia, toma ln(x) y ln(y))
-#   STATINV  -> y = a + b/x  (inversa, toma 1/x)
-#   Todas devuelven a, b (+ c para cuadratica) y r (coeficiente
-#   de correlacion/determinacion) en las 3 lineas de pantalla.
-#
-# NUEVO 3 (POL/REC MEJORADO - angulo en MODO_ANGULOS):
-#   Las conversiones rectangular<->polar ahora respetan MODO_ANGULOS.
-#   Antes POL() siempre esperaba el angulo en grados y REC() siempre
-#   devolvia el angulo en grados, ignorando SETUPRAD. Ahora:
-#     POL(r, theta): theta se interpreta en la unidad activa (DEG/RAD)
-#     REC(x,y): devuelve angulo en la unidad activa (DEG/RAD)
-#   Tambien se agrega cobertura en el test suite.
-#
-# NUEVO 4 (EDITOR INTERACTIVO DE MATRICES):
-#   El modo 6 (MATRIX) del menu MODE abre un editor de celda por celda
-#   al estilo Casio. El usuario elige nombre (A/B/C), dimension (hasta
-#   4x4) y luego ingresa cada elemento con IGUAL para avanzar. La
-#   matriz se guarda en MATRICES al completar la ultima celda.
-#   Comando alternativo en consola: MATEDIT<A>,<filas>,<cols>
-# FIX 1 (ALTA - STAT mezcla de datos 1v/2v):
-#   procesar_estadistica() ahora detecta explicitamente si
-#   ESTADISTICA_DATOS mezcla puntos de 1 variable (ADD:v -> y=None)
-#   con puntos pareados (STATX<x>,<y> -> y=valor). Antes, el chequeo
-#   "all(y is not None for y in ys)" simplemente fallaba en silencio
-#   y STATCALC devolvia N/Media/Var sin avisar por que no hubo
-#   regresion. Ahora l3 muestra "Error: mezcla 1v/2v" para que el
-#   usuario sepa que debe STATCLEAR antes de cambiar de modo.
-#
-# FIX 2 (MEDIA - notacion cientifica estilo Casio):
-#   decimal_a_fraccion() con FORMATO_NUM="SCI" usaba ".e" (minuscula,
-#   estilo Python: "1.235e+05"). Ahora usa ".E" (mayuscula: "1.235E+05"),
-#   mas cercano a la convencion Casio/calculadoras cientificas.
-#
-# FIX 3 (MEDIA - BYPASS mas claro):
-#   El toggle de MODO_EXAMEN mostraba "Modo Examen: True/False" (booleano
-#   crudo de Python). Ahora muestra "Examen: ACTIVO" / "Examen: INACTIVO",
-#   mas legible para quien no programa.
-#
-# FIX 4 (CRITICO - persistencia rota en PC):
-#   _RUTA_ESTADO = "/picalc_state.json" if True else "./picalc_state.json"
-#   SIEMPRE evaluaba a la rama "if True", es decir SIEMPRE usaba la ruta
-#   absoluta de la Pico ("/picalc_state.json"), incluso corriendo en PC,
-#   donde esa ruta no existe / no se puede escribir (falla silenciosa
-#   dentro del try/except de guardar_estado/cargar_estado). Ahora se usa
-#   ENTORNO_PICO para elegir la ruta correcta en cada plataforma.
-#
-# FIX 5 (COSMETICA - _parsear_decimales mas defensivo):
-#   Se agrega un .strip() interno al inicio de _parsear_decimales(),
-#   por si en el futuro algun llamador pasa el resto sin recortar
-#   (los llamadores actuales ya hacian .strip() antes de llamar).
-#
-# NUEVO 1 (TABLE con scroll real):
-#   Tras generar una tabla con TABLE<f>,<ini>,<fin>,<paso>, las teclas
-#   IZQ/DER (cuando el buffer de entrada esta vacio) navegan fila por
-#   fila por TABLA_RESULTADO mostrando "fila i/n: x=... f(x)=...",
-#   en vez de mostrar solo la primera fila con un mensaje generico.
-#
-# NUEVO 2 (Modo VECTOR real - VEC2/VEC3):
-#   Se agregan VEC2(x,y) y VEC3(x,y,z): calculan el modulo |v| y el/los
-#   angulo(s) del vector respecto a los ejes (en DEG o RAD segun
-#   MODO_ANGULOS). Junto con DOT/CROSS ya existentes, el modo 8
-#   (VECTOR) del menu MODE ahora tiene operaciones propias, no solo
-#   las de sistemas de ecuaciones.
-#
-# NUEVO 3 (Submenu EQN dedicado):
-#   Al seleccionar el modo 5 (EQN) desde el menu MODE, se abre un
-#   submenu con 1:Sistema 2x2  2:Sistema 3x3  3:Cuadratica  4:Cubica.
-#   Elegir una opcion precarga el token correspondiente (MAT2(, MAT3(,
-#   CUAD(, CUB() en ENTRADA_TOKENS, listo para que el usuario complete
-#   los argumentos -- replica el flujo "elegir tipo de ecuacion" de
-#   la fx-991 real.
-#
-# NUEVO 4 (Sugerencias contextuales de MODE):
-#   Al confirmar un modo en el menu MODE, la tercera linea de pantalla
-#   muestra un recordatorio rapido de los comandos relevantes para ese
-#   modo (ej. en BASE-N: "BIN OCT HEX AND OR").
-# ==========================================================
-
-# ----------------------------------------------------------
-# FIX 1 (CRITICO - _evaluar_entero en BASE-N):
-#   Ahora valida que el resultado no sea complex ni NaN antes
-#   de convertir a int. BIN(3+2I) antes daba comportamiento
-#   indefinido; ahora devuelve "No soporta complejos en BASE-N".
-#
-# FIX 2 (COSMÉTICA - comentarios de version obsoletos):
-#   Referencias a "FIX v4.2", "FIX v3.2" etc. en el codigo
-#   ahora indican la version original de aplicacion, sin
-#   confusion con el numero de version actual v4.5.
-#
-# FIX 3 (COSMÉTICA - cmd_table con paso negativo documentado):
-#   Los dos branches del bucle TABLE tienen comentarios que
-#   explican la logica del rango para paso positivo y negativo.
-#
-# FIX 4 (COSMÉTICA - SETUP reconocido y procesado):
-#   cmd_setup() atiende la tecla SETUP del teclado fisico:
-#   muestra angulos DEG/RAD, decimales FIX 0-9 y estado RAM.
-#   Ya no pasa silenciosa sin feedback al usuario.
-#
-# NUEVO 1 (PERSISTENCIA EN FLASH):
-#   guardar_estado() y cargar_estado() usan json (PC) o ujson
-#   (MicroPython) para guardar MEMORIA, ANS, MODO_CALC,
-#   MODO_COMPLEJO y MATRICES en /picalc_state.json (Pico) o
-#   ./picalc_state.json (PC) entre reinicios. Se cargan al
-#   arrancar y se guardan con el token SAVE (capa 2ND).
-#
-# NUEVO 2 (VARIABLES COMPLEJAS EN MEMORIA - documentado):
-#   MEMORIA["A"] puede guardar un valor complex (3+2i).
-#   Comportamiento intencional, identico a la fx-991 en CMPLX
-#   mode. BASE-N rechaza valores complejos (ver FIX 1).
-#
-# NUEVO 3 (TEST SUITE integrada):
-#   run_tests() ejecuta casos edge criticos en consola PC:
-#   raices negativas sin CMPLX, division por cero, "1.2.3",
-#   parentesis desbalanceados, TABLE overflow, MCD con vars.
-#   Token "TEST" en consola (bloqueado en MODO_EXAMEN).
-# ==========================================================
-
-# ==========================================================
-# 1. DETECCION DE ENTORNO Y HARDWARE
-# ==========================================================
+# ── 1. DETECCION DE ENTORNO Y HARDWARE ─────────────
 try:
     import machine
     import sh1106
@@ -288,9 +84,7 @@ if ENTORNO_PICO:
         pass
 
 
-# ==========================================================
-# 2. MATRIZ DE TECLADO FISICO (6 filas x 8 columnas = 48 teclas)
-# ==========================================================
+# ── 2. MATRIZ DE TECLADO FISICO (6 filas x 8 columnas = 48 teclas) ─
 # Filas -> salidas digitales (se activan una a la vez).
 # Columnas -> entradas con pull-down (leen si la fila activa llega).
 PINES_FILAS = [6, 7, 8, 9, 10, 11]
@@ -340,18 +134,15 @@ _ultimo_estado = {}
 _ultimo_cambio = {}
 MODO_2ND = False
 
-
 def _ahora_ms():
     if ENTORNO_PICO:
         return time.ticks_ms()
     return int(time.time() * 1000)
 
-
 def _diferencia_ms(ahora, antes):
     if ENTORNO_PICO:
         return time.ticks_diff(ahora, antes)
     return ahora - antes
-
 
 def escanear_teclado():
     """Recorre la matriz fila por fila (con antirebote) y devuelve el
@@ -406,9 +197,7 @@ def escanear_teclado():
     return None
 
 
-# ==========================================================
-# 3. CAPA DE SALIDA / RENDERIZADO VISUAL
-# ==========================================================
+# ── 3. CAPA DE SALIDA / RENDERIZADO VISUAL ─────────
 def renderizar_pantalla(linea_eq, l2="", l3="", l4="", cursor_pos=None):
     """Renderiza hasta 4 lineas para OLED 128x64 o consola PC.
     NEW v4.3: acepta cursor_pos (indice de caracter en linea_eq) para
@@ -450,18 +239,14 @@ def renderizar_pantalla(linea_eq, l2="", l3="", l4="", cursor_pos=None):
         print("=" * 34)
 
 
-# ==========================================================
-# 4. AYUDANTES MATEMATICOS Y ALGEBRA BASICA
-# ==========================================================
+# ── 4. AYUDANTES MATEMATICOS Y ALGEBRA BASICA ──────
 def mcd(a, b):
     while b:
         a, b = b, a % b
     return a
 
-
 def mcm(a, b):
     return abs(a * b) // mcd(a, b) if (a and b) else 0
-
 
 def factorizar_primos(n):
     if MODO_EXAMEN:
@@ -483,13 +268,9 @@ def factorizar_primos(n):
     except Exception:
         return "Error"
 
-
-# ==========================================================
 # 4b. COMBINATORIA: FACT (n!), NPR (permutaciones), NCR (combinaciones)
 #     (NUEVO 1 - v5.0)
-# ==========================================================
 LIMITE_FACTORIAL = 170  # 170! < 1.8e308 (limite de un float64); 171! desborda
-
 
 def calcular_factorial(n):
     """n! para entero 0 <= n <= LIMITE_FACTORIAL. Lanza ValueError si
@@ -504,7 +285,6 @@ def calcular_factorial(n):
         resultado *= i
     return float(resultado)
 
-
 def calcular_npr(n, r):
     """Permutaciones: nPr = n! / (n-r)!  con 0 <= r <= n."""
     if n < 0 or r < 0 or n != int(n) or r != int(r):
@@ -518,7 +298,6 @@ def calcular_npr(n, r):
     for i in range(n - r + 1, n + 1):
         resultado *= i
     return float(resultado)
-
 
 def calcular_ncr(n, r):
     """Combinaciones: nCr = n! / (r! * (n-r)!)  con 0 <= r <= n.
@@ -536,44 +315,8 @@ def calcular_ncr(n, r):
     return float(resultado)
 
 
-# ==========================================================
-# 5. MOTOR DE EXPRESIONES (SHUNTING-YARD + RPN)
-# ==========================================================
-# Reemplaza por completo el uso de eval(). Convierte un string infijo
-# (ej: "SIN(30)+2^3") en una lista RPN mediante el algoritmo de Dijkstra
-# y la evalua con una pila, sin pasar nunca por el interprete de Python.
-#
-# Modo de angulos (MODO_ANGULOS, configurable via SETUPDEG/SETUPRAD):
-#   - En DEG: SIN/COS/TAN convierten el argumento de grados a radianes,
-#     y ASIN/ACOS/ATAN convierten el resultado de radianes a grados.
-#   - En RAD: no se hace ninguna conversion (las funciones trabajan
-#     directamente en radianes, como math/cmath nativos).
-#   - El resto de funciones (hiperbolicas, logaritmos, raiz, exp, abs,
-#     FACT, CONJ) no dependen del modo de angulo; ARG si lo respeta.
-#
-# Variables reconocidas: A, B, C, X, Y (memoria) y ANS (ultimo resultado).
-#
-# NOTA (v4.2):
-#   El menos unario ahora tiene dos comportamientos segun el contexto
-#   (ver FIX 6 arriba): "-3^2" = -(3^2) = -9 (convencion estandar) y
-#   "2^-2" = 2^(-2) = 0.25 (exponente negativo). Ambos casos frecuentes
-#   funcionan correctamente sin necesidad de parentesis adicionales.
+# ── 5. MOTOR DE EXPRESIONES (SHUNTING-YARD + RPN) ──
 
-# FIX 2 (v5.1): cada entrada de FUNC_MAP es ahora un dict con campos
-# nombrados en vez de una tupla posicional (fn, modo). Esto separa los
-# dos conceptos que antes se mezclaban en "modo":
-#   "angulo": como afecta el MODO_ANGULOS activo (DEG/RAD/etc.)
-#     - "in":  el ARGUMENTO esta en la unidad angular activa y se
-#              convierte a radianes antes de llamar a fn (SIN/COS/TAN).
-#     - "out": el RESULTADO de fn esta en radianes y se convierte a la
-#              unidad angular activa (ASIN/ACOS/ATAN).
-#     - None:  fn no depende del modo angular (hiperbolicas, logs,
-#              raiz, exp, abs).
-#   "especial": funciones que NO usan "fn" via la rama generica de
-#     evaluar_rpn, sino un bloque propio (ver mas abajo):
-#     - "fact": factorial (FACT). - "conj": conjugado (CONJ).
-#     - "arg":  argumento/angulo de un complejo (ARG).
-#     - None (o ausente): funcion "normal", sigue la rama generica.
 FUNC_MAP = {
     # --- Trigonometricas directas (argumento en la unidad activa) ---
     "SIN":  {"fn": math.sin, "angulo": "in"},
@@ -603,7 +346,6 @@ CONSTANTES = {"PI": math.pi, "E": math.e, "I": 1j}  # I = unidad imaginaria
 
 PRECEDENCIA = {"+": 2, "-": 2, "*": 3, "/": 3, "%": 3, "^": 5, "NEG": 6, "NEGL": 4}
 ASOC_DERECHA = ("^", "NEG", "NEGL")
-
 
 def tokenizar(expr):
     """Convierte un string en una lista de tokens (NUM, VAR, FUNC, OP)."""
@@ -649,7 +391,6 @@ def tokenizar(expr):
         raise ValueError("Caracter no valido: " + c)
     return tokens
 
-
 def _debe_pop(top_val, op):
     """Decide si el operador en la cima de la pila debe pasar a la salida
     antes de empujar 'op', segun precedencia y asociatividad."""
@@ -660,7 +401,6 @@ def _debe_pop(top_val, op):
     if prec_top == prec_op and op not in ASOC_DERECHA:
         return True
     return False
-
 
 def a_rpn(tokens):
     """Algoritmo Shunting-yard: convierte tokens infijos a notacion RPN."""
@@ -688,15 +428,6 @@ def a_rpn(tokens):
                 while pila and pila[-1] != ("OP", "("):
                     salida.append(pila.pop())
             elif val == "-" and (prev is None or (prev[0] == "OP" and prev[1] != ")") or prev[0] == "FUNC"):
-                # Menos unario -> token especial NEG (o NEGL)
-                # FIX v4.2: distinguimos dos casos de menos unario mediante
-                # dos tokens de pila distintos, para que la comparacion de
-                # precedencias en _debe_pop funcione correctamente:
-                #  - NEG  (precedencia maxima): el "-" viene justo despues
-                #    de "^", ej "2^-2" = 2^(-2) = 0.25
-                #  - NEGL (precedencia baja, "Leading"): cualquier otro
-                #    menos unario, ej "-3^2" = -(3^2) = -9 (convencion
-                #    matematica estandar)
                 neg_tras_potencia = prev is not None and prev == ("OP", "^")
                 op_neg = "NEG" if neg_tras_potencia else "NEGL"
                 while pila and pila[-1][0] == "OP" and pila[-1][1] != "(" and _debe_pop(pila[-1][1], op_neg):
@@ -716,7 +447,6 @@ def a_rpn(tokens):
         salida.append(top)
 
     return salida
-
 
 def evaluar_rpn(rpn, variables=None):
     """Evalua una lista de tokens en notacion RPN usando una pila.
@@ -824,14 +554,12 @@ def evaluar_rpn(rpn, variables=None):
         raise ValueError("Expresion invalida")
     return pila[0]
 
-
 def evaluar_expresion(expr, variables=None):
     """Punto de entrada unico: tokeniza, convierte a RPN y evalua.
     Reemplaza todo uso de eval() en el motor matematico."""
     tokens = tokenizar(expr)
     rpn = a_rpn(tokens)
     return evaluar_rpn(rpn, variables)
-
 
 def variables_actuales(extra=None):
     """Diccionario de variables disponibles para el motor: memoria (A,B,C,X,Y)
@@ -843,9 +571,7 @@ def variables_actuales(extra=None):
     return datos
 
 
-# ==========================================================
-# 6. NUCLEO MATEMATICO AVANZADO
-# ==========================================================
+# ── 6. NUCLEO MATEMATICO AVANZADO ──────────────────
 def calcular_raiz_analitica(valor_str):
     try:
         valor = evaluar_expresion(valor_str.upper(), variables_actuales())
@@ -867,7 +593,6 @@ def calcular_raiz_analitica(valor_str):
         return f"{fuera}*v({dentro})" if fuera > 1 else f"v({dentro})"
     except Exception:
         return "Error"
-
 
 def decimal_a_fraccion(val):
     # Numeros complejos: formatear al estilo Casio "a+bi" sin parentesis ni "j"
@@ -895,12 +620,6 @@ def decimal_a_fraccion(val):
         im_str = "i" if mag == 1 else _fmt_parte(mag) + "i"
         return f"{_fmt_parte(r)}{signo}{im_str}"
 
-    # FIX 5 (v5.1): valores reales no finitos. Pueden llegar desde
-    # SOLVE (Newton-Raphson divergente), regresion lineal con datos
-    # degenerados, division 0/0, etc. round()/format con NaN o Inf NO
-    # lanzan excepcion (devuelven "nan"/"inf"/"-inf"), por lo que sin
-    # este chequeo el usuario veria esas cadenas crudas en pantalla en
-    # vez de un mensaje de error reconocible.
     if isinstance(val, float):
         if math.isnan(val):
             return "Error: NaN"
@@ -933,12 +652,6 @@ def decimal_a_fraccion(val):
         if isinstance(val, int) or val.is_integer():
             return str(int(val))
 
-        # FIX v4.2: aproximacion por fracciones continuas.
-        # El metodo anterior (val*100000 / mcd con 100000) casi nunca
-        # encontraba fracciones simples: 1/3 = 0.3333333333 ->
-        # mcd(33333,100000)=1, asi que 1/3 nunca se reconstruia como
-        # "1/3". El algoritmo de fracciones continuas SI encuentra
-        # 1/3, 2/3, 1/7, 22/7, etc. con denominador < 1000.
         signo = -1 if val < 0 else 1
         x = abs(val)
         h_prev, h_prev2 = 1, 0
@@ -968,9 +681,7 @@ def decimal_a_fraccion(val):
         return f"{val:.5f}"
 
 
-# ==========================================================
-# 7. SOLVER, MATRICES Y VECTORES (ALGEBRA REAL)
-# ==========================================================
+# ── 7. SOLVER, MATRICES Y VECTORES (ALGEBRA REAL) ──
 def resolver_ecuacion_lineal(eq_str):
     """Resuelve f(x) = 0 o f(x) = g(x) mediante Newton-Raphson (25 iter max).
 
@@ -1011,7 +722,6 @@ def resolver_ecuacion_lineal(eq_str):
             break
     return "Sin Solucion Real"
 
-
 def extraer_numeros(cmd, etiqueta):
     """Extrae una lista de floats entre parentesis (o lo que siga) tras 'etiqueta'."""
     resto = cmd.split(etiqueta, 1)[-1]
@@ -1023,17 +733,14 @@ def extraer_numeros(cmd, etiqueta):
         contenido = resto.replace("(", "").replace(")", "")
     return [float(x) for x in contenido.split(",") if x.strip() != ""]
 
-
 def det2(m):
     """Determinante de una matriz 2x2 dada como [a, b, c, d]."""
     return m[0] * m[3] - m[1] * m[2]
-
 
 def det3(m):
     """Determinante de una matriz 3x3 dada como [a,b,c, d,e,f, g,h,i]."""
     a, b, c, d, e, f, g, h, i = m
     return a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
-
 
 def resolver_sistema_2x2(coefs):
     """Resuelve a1*x+b1*y=c1 ; a2*x+b2*y=c2 por Regla de Cramer."""
@@ -1045,7 +752,6 @@ def resolver_sistema_2x2(coefs):
     Dy = det2([a1, c1, a2, c2])
     return Dx / D, Dy / D
 
-
 def resolver_sistema_3x3(coefs):
     """Resuelve un sistema 3x3 (12 valores: 3 filas de a,b,c,d) por Cramer."""
     a1, b1, c1, d1, a2, b2, c2, d2, a3, b3, c3, d3 = coefs
@@ -1056,7 +762,6 @@ def resolver_sistema_3x3(coefs):
     Dy = det3([a1, d1, c1, a2, d2, c2, a3, d3, c3])
     Dz = det3([a1, b1, d1, a2, b2, d2, a3, b3, d3])
     return Dx / D, Dy / D, Dz / D
-
 
 def resolver_sistema_matrices(cmd):
     """Dispatcher de MAT2(...), MAT3(...), DOT(...) y CROSS(...)."""
@@ -1105,9 +810,7 @@ def resolver_sistema_matrices(cmd):
     return "Error Matriz", "", ""
 
 
-# ==========================================================
-# 8. CALCULO DIFERENCIAL E INTEGRAL NUMERICO
-# ==========================================================
+# ── 8. CALCULO DIFERENCIAL E INTEGRAL NUMERICO ─────
 def calcular_derivada(eq, punto_str):
     if MODO_EXAMEN:
         return "Error: No disp"
@@ -1120,7 +823,6 @@ def calcular_derivada(eq, punto_str):
         return f"d/dx = {(f_xh1 - f_xh2) / (2 * h):.5f}"
     except Exception:
         return "Error"
-
 
 def calcular_integral(eq, limites_str):
     """Integral definida usando la Regla de Simpson (100 intervalos)."""
@@ -1145,9 +847,7 @@ def calcular_integral(eq, limites_str):
         return "Error"
 
 
-# ==========================================================
-# 9. ESTADISTICA BASADA EN LISTAS (STAT)
-# ==========================================================
+# ── 9. ESTADISTICA BASADA EN LISTAS (STAT) ─────────
 def procesar_estadistica(comando):
     """Maneja el ingreso de datos en lista y los calculos STAT.
 
@@ -1230,9 +930,7 @@ def procesar_estadistica(comando):
         return f"Error Estad: {ex}"[:16], "", ""
 
 
-# ==========================================================
-# 10. MEMORIA: STO / RCL / ANS
-# ==========================================================
+# ── 10. MEMORIA: STO / RCL / ANS ───────────────────
 def comando_sto(cmd):
     """'<expr>STOA' guarda el valor de <expr> (o de ANS si esta vacio) en A."""
     global ANS
@@ -1250,7 +948,6 @@ def comando_sto(cmd):
     except Exception:
         return "Error Sintaxis"
 
-
 def comando_rcl(cmd):
     """'RCLA' recupera el valor guardado en A y lo deja como resultado/ANS."""
     global ANS
@@ -1263,30 +960,13 @@ def comando_rcl(cmd):
     return f"{var} = {decimal_a_fraccion(MEMORIA[var])}"
 
 
-
-
-# ==========================================================
-# 10v4.5-A. PERSISTENCIA EN FLASH (NUEVO 1 - v4.5)
-# ==========================================================
-# Archivo de estado: /picalc_state.json en la Pico (raiz de la
-# flash), o ./picalc_state.json en PC para desarrollo.
-# Formato JSON: { "memoria": {...}, "ans": 0.0, "modo_calc": 1,
-#                 "modo_complejo": false, "matrices": {...} }
-# Los valores complex se serializan como [real, imag] y se
-# reconstruyen al cargar (comportamiento intencional, ver NUEVO 2).
+# ── 10v4.5-A. PERSISTENCIA EN FLASH (NUEVO 1 - v4.5) ─
 _RUTA_ESTADO = "/picalc_state.json" if ENTORNO_PICO else "./picalc_state.json"
-# FIX 4 (v5.2): la condicion anterior era "if True", asi que SIEMPRE
-# elegia "/picalc_state.json" sin importar la plataforma. En PC esa
-# ruta absoluta no se puede crear/escribir (permiso denegado o
-# directorio inexistente), y como guardar_estado/cargar_estado estan
-# envueltos en try/except, la persistencia fallaba en silencio durante
-# el desarrollo. Ahora se usa ENTORNO_PICO para elegir la ruta correcta.
 
 try:
     import ujson as _json_mod   # MicroPython
 except ImportError:
     import json as _json_mod    # CPython (PC / tests)
-
 
 def _serializar_valor(v):
     """Convierte un valor (float, complex, None) a formato JSON seguro."""
@@ -1294,13 +974,11 @@ def _serializar_valor(v):
         return {"__complex__": True, "r": v.real, "i": v.imag}
     return v
 
-
 def _deserializar_valor(v):
     """Reconstruye un valor desde su representacion JSON."""
     if isinstance(v, dict) and v.get("__complex__"):
         return complex(v["r"], v["i"])
     return v
-
 
 def guardar_estado():
     """Guarda MEMORIA, ANS, modos, SETUP y matrices en flash/disco.
@@ -1330,7 +1008,6 @@ def guardar_estado():
         return "Estado guardado"
     except Exception as ex:
         return f"Error save: {ex}"
-
 
 def cargar_estado():
     """Carga el estado guardado previamente. Se llama al arrancar."""
@@ -1376,9 +1053,7 @@ def cargar_estado():
         return False
 
 
-# ==========================================================
-# 10v4.5-B. SETUP (FIX 4 - v4.5, completado en v5.0)
-# ==========================================================
+# ── 10v4.5-B. SETUP (FIX 4 - v4.5, completado en v5.0) ─
 # En v4.3 la tecla SETUP del layout fisico se definia pero nunca
 # se procesaba: el token pasaba al buffer y se evaluaba como
 # expresion desconocida. v4.5 agrego cmd_setup() con DEG/RAD;
@@ -1386,23 +1061,14 @@ def cargar_estado():
 # motor matematico (FIX 0, ver evaluar_rpn).
 MODO_ANGULOS = "DEG"  # "DEG" o "RAD" — usado por el motor trig
 
-
 def _rad_a_modo_angular(rad):
     """Convierte un angulo en radianes al MODO_ANGULOS actual (DEG/RAD).
     Usado por VEC2/VEC3 (NUEVO 2, v5.2) para mostrar angulos de forma
     consistente con SETUP DEG/RAD, igual que ASIN/ACOS/ATAN."""
     return math.degrees(rad) if MODO_ANGULOS == "DEG" else rad
 
-# NUEVO 3 (v5.0): formato de presentacion numerica.
-#  - "NORM": comportamiento v4.x (entero limpio, fraccion continua si
-#            es exacta, sino 5 decimales). Por defecto.
-#  - "FIX":  siempre N decimales fijos (FORMATO_DECIMALES, 0-9), sin
-#            intentar fracciones. Ej: FIX 2 -> "3.14".
-#  - "SCI":  notacion cientifica con FORMATO_DECIMALES cifras
-#            significativas tras la coma. Ej: "3.14e+00".
 FORMATO_NUM = "NORM"
 FORMATO_DECIMALES = 4  # 0-9, usado por FIX y SCI
-
 
 def _parsear_decimales(resto, predeterminado):
     """FIX 4 (v5.1): extrae la cantidad de decimales (0-9) del texto
@@ -1422,7 +1088,6 @@ def _parsear_decimales(resto, predeterminado):
             break
     n = int(digitos) if digitos else predeterminado
     return max(0, min(9, n))
-
 
 def cmd_setup(cmd=""):
     """Muestra y permite cambiar la configuracion del sistema.
@@ -1472,10 +1137,7 @@ def cmd_setup(cmd=""):
             f"TABLE max:{TABLA_MAX_FILAS} Den<{FRACCION_DEN_MAX}")
 
 
-
-# ==========================================================
-# 10v4.5-C. TEST SUITE INTEGRADA (NUEVO 3 - v4.5)
-# ==========================================================
+# ── 10v4.5-C. TEST SUITE INTEGRADA (NUEVO 3 - v4.5) ─
 def run_tests():
     """Ejecuta casos edge criticos y devuelve (pasados, fallados, log).
     Solo disponible en consola PC (bloqueado en MODO_EXAMEN).
@@ -1609,7 +1271,7 @@ def run_tests():
     check("1/3 en FIX2 = 0.33", r, "0.33")
     cmd_setup("SETUPSCI3")
     r, *_ = procesar_todo("123456")
-    check("123456 en SCI3 = 1.235e+05", r, "1.235e+05")
+    check("123456 en SCI3 = 1.235E+05", r, "1.235E+05")
     cmd_setup("SETUPNORM")
     r, *_ = procesar_todo("1/3")
     check("1/3 en NORM = 1/3", r, "1/3")
@@ -1622,13 +1284,14 @@ def run_tests():
     for x, y in [(1, 3), (2, 5), (3, 7), (4, 9)]:
         procesar_estadistica(f"X{x},{y}")
     l1, l2, l3 = procesar_estadistica("CALC")
-    check("STAT regresion y=2x+1 -> a=1 b=2", l2, "a=1  b=2")
-    check("STAT regresion y=2x+1 -> r=1", l3, "r = 1.0000")
+    check("STAT regresion y=2x+1 -> l1 tiene 'a=1'", "a=1" in l1, True)
+    check("STAT regresion y=2x+1 -> l2 tiene 'b=2'", "b=2" in l2, True)
+    check("STAT regresion y=2x+1 -> r=1", l3, "r=1.0000")
     procesar_estadistica("CLEAR")
     globals()["ESTADISTICA_DATOS"] = prev_datos
 
     total = pasados + fallados
-    print(f"\n=== TEST SUITE PiCalc v5.2 ===")
+    print(f"\n=== TEST SUITE PiCalc v5.3 ===")
     for l in log:
         print(l)
     print(f"\nResultado: {pasados}/{total} pasados")
@@ -1637,9 +1300,7 @@ def run_tests():
             "Ver consola" if not ENTORNO_PICO else "")
 
 
-# ==========================================================
-# 11v4-A. MODULO CMPLX: NUMEROS COMPLEJOS
-# ==========================================================
+# ── 11v4-A. MODULO CMPLX: NUMEROS COMPLEJOS ────────
 def toggle_cmplx():
     """Activa/desactiva el modo numeros complejos."""
     global MODO_COMPLEJO
@@ -1647,9 +1308,7 @@ def toggle_cmplx():
     return f"Modo CMPLX: {'ON' if MODO_COMPLEJO else 'OFF'}"
 
 
-# ==========================================================
-# 11v4-B. MODULO MAT: MATRICES INDEPENDIENTES (hasta 4x4)
-# ==========================================================
+# ── 11v4-B. MODULO MAT: MATRICES INDEPENDIENTES (hasta 4x4) ─
 def _fmt_mat(m, filas, cols):
     """Formatea una matriz plana para la pantalla OLED (multi-linea)."""
     lineas = []
@@ -1657,7 +1316,6 @@ def _fmt_mat(m, filas, cols):
         fila = [f"{m[f * cols + c]:.3f}" for c in range(cols)]
         lineas.append(" ".join(fila))
     return lineas
-
 
 def cmd_matdef(cmd):
     """MATDEF<nombre>,<filas>,<cols>,<v1>,<v2>,...
@@ -1683,13 +1341,11 @@ def cmd_matdef(cmd):
     except Exception as ex:
         return f"Error Mat: {ex}", "", ""
 
-
 def _get_mat(nombre):
     m = MATRICES.get(nombre)
     if m is None:
         raise ValueError(f"Mat{nombre} no definida")
     return m
-
 
 def cmd_matadd(cmd):
     """MATADD<A>,<B> -> MatA + MatB, resultado en lineas de pantalla."""
@@ -1705,7 +1361,6 @@ def cmd_matadd(cmd):
         return lineas[0], lineas[1] if len(lineas) > 1 else "", lineas[2] if len(lineas) > 2 else ""
     except Exception as ex:
         return f"Error: {ex}", "", ""
-
 
 def cmd_matmul(cmd):
     """MATMUL<A>,<B> -> MatA x MatB (producto matricial).
@@ -1729,7 +1384,6 @@ def cmd_matmul(cmd):
     except Exception as ex:
         return f"Error: {ex}", "", ""
 
-
 def cmd_mattrans(cmd):
     """MATTRANS<A> -> transpuesta de MatA."""
     if MODO_EXAMEN:
@@ -1743,7 +1397,6 @@ def cmd_mattrans(cmd):
         return lineas[0], lineas[1] if len(lineas) > 1 else "", ""
     except Exception as ex:
         return f"Error: {ex}", "", ""
-
 
 def cmd_matdet(cmd):
     """MATDET<A> -> determinante de MatA (solo 2x2 y 3x3)."""
@@ -1761,14 +1414,12 @@ def cmd_matdet(cmd):
     except Exception as ex:
         return f"Error: {ex}", "", ""
 
-
 def _inv2(d):
     """Inversa de matriz 2x2 (lista plana de 4 elementos)."""
     det = det2(d)
     if abs(det) < 1e-12:
         raise ValueError("Singular")
     return [d[3] / det, -d[1] / det, -d[2] / det, d[0] / det]
-
 
 def _inv3(d):
     """Inversa de matriz 3x3 por adjugada / det."""
@@ -1782,7 +1433,6 @@ def _inv3(d):
         (dd * h - e * g), -(a * h - b * g), (a * e - b * dd),
     ]
     return [v / det for v in adj]
-
 
 def cmd_matinv(cmd):
     """MATINV<A> -> inversa de MatA (2x2 o 3x3)."""
@@ -1805,16 +1455,13 @@ def cmd_matinv(cmd):
         return f"Error: {ex}", "", ""
 
 
-# ==========================================================
-# 11v4-C. MODULO EQN: ECUACIONES CUADRATICAS Y CUBICAS
-# ==========================================================
+# ── 11v4-C. MODULO EQN: ECUACIONES CUADRATICAS Y CUBICAS ─
 def _fmt_raiz(v):
     """Formatea una raiz real o compleja de forma compacta."""
     if isinstance(v, complex):
         return decimal_a_fraccion(v)
     v = round(v, 8)
     return str(int(v)) if v == int(v) else f"{v:.5f}"
-
 
 def cmd_cuad(cmd):
     """CUAD(a,b,c) -> resuelve ax^2 + bx + c = 0 (formula cuadratica).
@@ -1839,7 +1486,6 @@ def cmd_cuad(cmd):
         return "Cuadratica:", f"X1={_fmt_raiz(x1)}", f"X2={_fmt_raiz(x2)}"
     except Exception as ex:
         return f"Error: {ex}", "", ""
-
 
 def cmd_cub(cmd):
     """CUB(a,b,c,d) -> resuelve ax^3 + bx^2 + cx + d = 0
@@ -1887,9 +1533,7 @@ def cmd_cub(cmd):
         return f"Error: {ex}", "", ""
 
 
-# ==========================================================
-# 11v4-D. MODULO TABLE: TABULACION DE FUNCIONES
-# ==========================================================
+# ── 11v4-D. MODULO TABLE: TABULACION DE FUNCIONES ──
 def cmd_table(cmd):
     """TABLE<expr>,<inicio>,<fin>,<paso>
     Genera la tabla f(x) para x en [inicio, fin] con paso dado.
@@ -1942,7 +1586,6 @@ def cmd_table(cmd):
     except Exception as ex:
         return f"Error Table: {ex}", "", ""
 
-
 def renderizar_tabla_fila():
     """NUEVO 1 (v5.2): muestra la fila TABLA_INDICE de TABLA_RESULTADO.
     Se invoca desde IZQ/DER cuando el buffer de entrada esta vacio,
@@ -1959,9 +1602,7 @@ def renderizar_tabla_fila():
                          "IZQ/DER mueve, AC sale")
 
 
-# ==========================================================
-# 11v4-E. MODULO BASEN: CONVERSION DE BASE Y LOGICA DE BITS
-# ==========================================================
+# ── 11v4-E. MODULO BASEN: CONVERSION DE BASE Y LOGICA DE BITS ─
 def _evaluar_entero(expr):
     """Evalua una expresion y la convierte a int (truncando al entero mas cercano).
     FIX 1 (v4.5): valida que el resultado no sea complex ni infinito/NaN antes
@@ -1973,7 +1614,6 @@ def _evaluar_entero(expr):
     if not math.isfinite(val):
         raise ValueError("Resultado no finito")
     return int(val)
-
 
 def cmd_basen(cmd):
     """BIN(n), OCT(n), HEX(n) -> convierte n a la base indicada.
@@ -2010,18 +1650,7 @@ def cmd_basen(cmd):
         return f"Error BASE-N: {ex}", "", ""
 
 
-# ==========================================================
-# 11v5.3-A. ECUACIONES SIMULTANEAS (NUEVO 1 - v5.3)
-# ==========================================================
-# Resuelve Ax = b para sistemas 2x2, 3x3 y 4x4 mediante
-# eliminacion gaussiana con pivoteo parcial (mas numericamente
-# estable que Cramer para matrices grandes o mal condicionadas).
-# Supera la Casio fx-991 que solo implementa hasta 3x3.
-#
-# Sintaxis:
-#   SIMU2(a11,a12,b1, a21,a22,b2)         -> 6 argumentos
-#   SIMU3(a11..a33, b1,b2,b3)             -> 12 argumentos
-#   SIMU4(a11..a44, b1,b2,b3,b4)          -> 20 argumentos
+# ── 11v5.3-A. ECUACIONES SIMULTANEAS (NUEVO 1 - v5.3) ─
 
 def _gauss(A, b):
     """Eliminacion gaussiana con pivoteo parcial.
@@ -2053,7 +1682,6 @@ def _gauss(A, b):
             x[i] -= M[i][j] * x[j]
         x[i] /= M[i][i]
     return x
-
 
 def cmd_simu(cmd):
     """SIMU<n>(<args>) resuelve un sistema de ecuaciones lineales n×n.
@@ -2120,18 +1748,7 @@ def cmd_simu(cmd):
         return f"Error SIMU: {ex}"[:16], "", ""
 
 
-# ==========================================================
-# 11v5.3-B. REGRESIONES COMPLETAS (NUEVO 2 - v5.3)
-# ==========================================================
-# Complementa la regresion lineal existente con los modelos
-# que tiene la Casio fx-991 ClassWiz:
-#   STATLIN  y = a + bx        (lineal)
-#   STATCUAD y = a + bx + cx²  (cuadratica, usa sistema 3x3)
-#   STATEXP  y = ae^(bx)       (linealiza: ln(y) = ln(a) + bx)
-#   STATLOG  y = a + b*ln(x)   (linealiza: y vs ln(x))
-#   STATPOT  y = ax^b          (linealiza: ln(y) = ln(a) + b*ln(x))
-#   STATINV  y = a + b/x       (linealiza: y vs 1/x)
-# Todas reutilizan _regresion_lineal() sobre los datos transformados.
+# ── 11v5.3-B. REGRESIONES COMPLETAS (NUEVO 2 - v5.3) ─
 
 def _regresion_lineal(xs, ys):
     """Minimos cuadrados y = a + bx.
@@ -2153,7 +1770,6 @@ def _regresion_lineal(xs, ys):
     den_r = math.sqrt(max(0.0, (n * sxx - sx**2) * (n * syy - sy**2)))
     r = num_r / den_r if den_r > 1e-12 else 0.0
     return a, b, r
-
 
 def _regresion_cuadratica(xs, ys):
     """Regresion cuadratica y = a + bx + cx² por sistema 3x3 normal."""
@@ -2178,7 +1794,6 @@ def _regresion_cuadratica(xs, ys):
     r2 = 1 - ss_res / ss_tot if ss_tot > 1e-12 else 1.0
     return a, b, c, math.sqrt(max(0.0, r2))
 
-
 def _fmt_regresion(modelo, a, b, r, c=None):
     """Formatea el resultado de una regresion en 3 lineas de pantalla."""
     fa = decimal_a_fraccion(round(a, 5))
@@ -2189,7 +1804,6 @@ def _fmt_regresion(modelo, a, b, r, c=None):
     if c is not None:
         linea2 += f" c={decimal_a_fraccion(round(c, 5))}"
     return linea1, linea2, f"r={fr}"
-
 
 def calcular_regresion(modelo, datos):
     """Despacha el calculo de regresion segun el modelo solicitado.
@@ -2244,9 +1858,7 @@ def calcular_regresion(modelo, datos):
     return "Modelo desconocido", f"'{modelo}'", "LIN CUAD EXP LOG POT INV"
 
 
-# ==========================================================
-# 11v5.3-C. EDITOR INTERACTIVO DE MATRICES (NUEVO 4 - v5.3)
-# ==========================================================
+# ── 11v5.3-C. EDITOR INTERACTIVO DE MATRICES (NUEVO 4 - v5.3) ─
 # Estado del editor de matrices
 _MATEDIT_ESTADO = {
     "activo": False,   # True mientras el editor esta abierto
@@ -2256,7 +1868,6 @@ _MATEDIT_ESTADO = {
     "datos": [],       # lista plana que se va llenando
     "celda": 0,        # indice de la celda actual (0-based)
 }
-
 
 def matedit_iniciar(nombre, filas, cols):
     """Inicia el editor de matrices: reserva estado y muestra la primera celda.
@@ -2278,7 +1889,6 @@ def matedit_iniciar(nombre, filas, cols):
     }
     return _matedit_prompt()
 
-
 def _matedit_prompt():
     """Devuelve el mensaje de pantalla para la celda actual del editor."""
     e = _MATEDIT_ESTADO
@@ -2291,7 +1901,6 @@ def _matedit_prompt():
     return (f"Mat{e['nombre']} {e['filas']}x{e['cols']}",
             f"Ingresa [{fila},{col}]",
             f"({celda+1}/{total}) IGUAL=ok")
-
 
 def matedit_ingresar(valor_str):
     """Recibe el valor de la celda actual (como string evaluable),
@@ -2327,7 +1936,6 @@ def matedit_ingresar(valor_str):
 
     return _matedit_prompt()
 
-
 def cmd_matedit(cmd):
     """MATEDIT<nombre>,<filas>,<cols>
     Inicia el editor interactivo de matrices desde consola o teclado fisico.
@@ -2343,9 +1951,7 @@ def cmd_matedit(cmd):
         return f"Uso: MATEDITA,f,c", f"Error: {ex}"[:16], ""
 
 
-# ==========================================================
-# 11v5.3-D. POL/REC CON MODO_ANGULOS (NUEVO 3 - v5.3)
-# ==========================================================
+# ── 11v5.3-D. POL/REC CON MODO_ANGULOS (NUEVO 3 - v5.3) ─
 # Las funciones POL/REC originales (v4.x) siempre usaban grados,
 # ignorando SETUPRAD. Ahora respetan MODO_ANGULOS: en RAD, theta
 # se interpreta como radianes y el angulo de salida tambien es RAD.
@@ -2354,11 +1960,9 @@ def _angulo_a_rad(theta):
     """Convierte theta desde la unidad activa (DEG/RAD) a radianes."""
     return theta if MODO_ANGULOS == "RAD" else math.radians(theta)
 
-
 def _rad_a_angulo(rad):
     """Convierte radianes a la unidad activa (DEG/RAD)."""
     return rad if MODO_ANGULOS == "RAD" else math.degrees(rad)
-
 
 def cmd_pol(cmd):
     """POL(r, theta): convierte coordenadas polares a rectangulares.
@@ -2375,7 +1979,6 @@ def cmd_pol(cmd):
     except Exception as ex:
         return f"Error POL: {ex}"[:16], "", ""
 
-
 def cmd_rec(cmd):
     """REC(x, y): convierte coordenadas rectangulares a polares.
     El angulo devuelto esta en la unidad activa (DEG o RAD segun SETUP)."""
@@ -2390,14 +1993,11 @@ def cmd_rec(cmd):
         return f"Error REC: {ex}"[:16], "", ""
 
 
-# ==========================================================
-# 11v5.3-E. MATEDIT EN EL BUCLE (estado de ingreso celda a celda)
-# ==========================================================
+# ── 11v5.3-E. MATEDIT EN EL BUCLE (estado de ingreso celda a celda) ─
 # El bucle iniciar() consulta _MATEDIT_ESTADO["activo"] para saber
 # si debe redirigir el token IGUAL a matedit_ingresar() en vez del
 # calculo normal. El buffer ENTRADA_TOKENS sigue funcionando igual:
 # el usuario escribe el valor de la celda y presiona IGUAL para confirmarlo.
-
 
 # NUEVO 2 (v5.2): el modo 8 (VECTOR) del menu MODE ya tenia DOT/CROSS
 # (producto escalar/vectorial entre DOS vectores), pero no tenia ninguna
@@ -2440,17 +2040,7 @@ def cmd_vector(cmd):
     return "Error Vec", "", ""
 
 
-# ==========================================================
-# 11. CAPA DE ENTRADA: TOKENS Y MULTIPLICACION IMPLICITA
-# ==========================================================
-# Atajos de teclado/consola -> token real inyectado en ENTRADA_TOKENS.
-# Las funciones matematicas que entran al motor RPN llevan "(" incluido
-# (el "(" se procesa como token aparte por el motor). Los comandos
-# especiales (SOLVE, DERIV, INT, STAT, STO, RCL, etc.) se escriben sin
-# "(": su parseo es por split() de texto, no por el motor RPN.
-# FIX 7 (v4.4): ALIAS_TOKENS se genera automaticamente desde FUNC_MAP
-# para evitar duplicar la lista de funciones matematicas. Las entradas
-# especiales que no estan en FUNC_MAP se agregan aparte.
+# ── 11. CAPA DE ENTRADA: TOKENS Y MULTIPLICACION IMPLICITA ─
 ALIAS_TOKENS = {nombre: nombre + "(" for nombre in FUNC_MAP}
 # Comandos especiales de teclado fisico / 2ND que no estan en FUNC_MAP:
 ALIAS_TOKENS.update({
@@ -2462,13 +2052,10 @@ ALIAS_TOKENS.update({
     "VEC2": "VEC2(", "VEC3": "VEC3(",  # NUEVO 2 (v5.2): modo VECTOR real
 })
 
-
 def es_numero_str(s):
     return s != "" and all(ch in "0123456789." for ch in s)
 
-
 VALORES_CIERRE = (")", "PI", "E")
-
 
 def necesita_mult_implicita(anterior, nuevo):
     """True si hay que insertar un '*' entre dos tokens consecutivos
@@ -2489,7 +2076,6 @@ def necesita_mult_implicita(anterior, nuevo):
         return False  # no separar digitos del mismo numero (2,3 -> "23")
     return True
 
-
 def construir_expresion(tokens):
     """Une la lista de TOKENS insertando '*' donde haga falta
     (multiplicacion implicita). El resultado es lo que se le pasa
@@ -2504,10 +2090,7 @@ def construir_expresion(tokens):
     return "".join(partes)
 
 
-
-# ==========================================================
-# 11b. MENU MODE (v4.3) - Identico al de la Casio fx-991 CW
-# ==========================================================
+# ── 11b. MENU MODE (v4.3) - Identico al de la Casio fx-991 CW ─
 # Opciones del menu: 8 modos en 2 filas de 4, igual que ClassWiz.
 # Fila 1: 1:COMP   2:CMPLX  3:STAT   4:BASE-N
 # Fila 2: 5:EQN    6:MATRIX 7:TABLE  8:VECTOR
@@ -2522,7 +2105,6 @@ _OPCIONES_MODE = [
     (7, "TABLE"),
     (8, "VECTOR"),
 ]
-
 
 def renderizar_menu_mode(seleccion=None):
     """Muestra el menu MODE en pantalla al estilo Casio fx-991.
@@ -2567,7 +2149,6 @@ def renderizar_menu_mode(seleccion=None):
         print("|  Digita numero (1-8) o AC=salir  |")
         print("=" * 36)
 
-
 def aplicar_modo(num):
     """Aplica el modo seleccionado del menu MODE y devuelve mensaje
     de confirmacion al estilo Casio (ej: 'COMP Mode').
@@ -2593,16 +2174,13 @@ def aplicar_modo(num):
     return f"{nombre} Mode"
 
 
-# ==========================================================
-# 11b-2. SUBMENU EQN (v5.2) - tipo de ecuacion
-# ==========================================================
+# ── 11b-2. SUBMENU EQN (v5.2) - tipo de ecuacion ───
 _OPCIONES_EQN = [
     (1, "Sist. 2x2", "MAT2("),
     (2, "Sist. 3x3", "MAT3("),
     (3, "Cuadratica", "CUAD("),
     (4, "Cubica", "CUB("),
 ]
-
 
 def renderizar_menu_eqn():
     """Muestra el submenu EQN: tipo de ecuacion a resolver.
@@ -2626,7 +2204,6 @@ def renderizar_menu_eqn():
         print("|  Digita numero (1-4) o AC=salir   |")
         print("=" * 36)
 
-
 def aplicar_eqn(num):
     """Precarga ENTRADA_TOKENS con el token de la ecuacion elegida
     (MAT2(, MAT3(, CUAD(, CUB() y posiciona el cursor al final, listo
@@ -2640,7 +2217,6 @@ def aplicar_eqn(num):
     CURSOR_POS = len(ENTRADA_TOKENS)
     EN_MENU_EQN = False
     return True
-
 
 # NUEVO 4 (v5.2): recordatorio rapido de comandos al confirmar un modo
 # desde el menu MODE (tercera linea de pantalla).
@@ -2656,9 +2232,7 @@ SUGERENCIAS_MODO = {
 }
 
 
-# ==========================================================
-# 12. PROCESADOR DE COMANDOS GENERAL
-# ==========================================================
+# ── 12. PROCESADOR DE COMANDOS GENERAL ─────────────
 def procesar_todo(entrada_cruda):
     """Recibe el string ya con multiplicacion implicita resuelta
     (salida de construir_expresion) y despacha al modulo correcto."""
@@ -2796,9 +2370,7 @@ def procesar_todo(entrada_cruda):
         return f"Err:{type(e).__name__}", "", ""
 
 
-# ==========================================================
-# 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3
-# ==========================================================
+# ── 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3 ────
 INSTRUCCIONES = (
     "PiCalc OS v5.3 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
@@ -2822,13 +2394,11 @@ INSTRUCCIONES = (
     "Cursor: IZQ DER  |  Menu modos: MODE (digita 1-8; el 5=EQN abre submenu 1-4)"
 )
 
-
 def _pos_caracter_cursor(tokens, cursor_pos):
     """Convierte CURSOR_POS (indice de token) en indice de caracter
     dentro del string 'join(tokens)', para que el cursor visual '|'
     aparezca en el lugar correcto."""
     return sum(len(t) for t in tokens[:cursor_pos])
-
 
 def iniciar():
     global MODO_EXAMEN, ENTRADA_TOKENS, CURSOR_POS, EN_MENU_MODE, _SELECCION_MENU
@@ -2857,13 +2427,6 @@ def iniciar():
 
         accion_u = accion.upper()
 
-        # ==================================================
-        # BLOQUE MENU MODE (v4.3)
-        # El menu MODE captura los tokens mientras esta abierto.
-        # Solo acepta: digitos 1-8 (seleccionar modo),
-        #              IZQ/DER (navegar opciones en Pico),
-        #              AC (cerrar sin cambiar modo).
-        # ==================================================
         if EN_MENU_MODE:
             if accion_u == "AC":
                 EN_MENU_MODE = False
@@ -2899,12 +2462,6 @@ def iniciar():
                 renderizar_menu_mode(_SELECCION_MENU)
             continue
 
-        # ==================================================
-        # BLOQUE MENU EQN (v5.2)
-        # Submenu abierto al confirmar el modo 5 (EQN) en MODE.
-        # Solo acepta: digitos 1-4 (tipo de ecuacion -> precarga token),
-        #              AC (cerrar sin elegir nada).
-        # ==================================================
         if EN_MENU_EQN:
             if accion_u == "AC":
                 EN_MENU_EQN = False
@@ -3015,13 +2572,6 @@ def iniciar():
                     CURSOR_POS = 0
             continue
 
-        # ==================================================
-        # INSERTAR TOKEN EN LA POSICION DEL CURSOR (v4.3)
-        # ==================================================
-        # FIX v3.2: en la Pico, escanear_teclado() devuelve tokens ya formateados
-        # (ej: "SIN(", "MAT2(") que NO son puramente .isalpha(). Para que PC y Pico
-        # tengan comportamiento identico, intentamos el alias primero sobre la parte
-        # alfabetica base, y si no hay alias, usamos el token tal como llego.
         token = ALIAS_TOKENS.get(accion_u, None)
         if token is None:
             token = accion_u if accion_u in ALIAS_TOKENS.values() else accion
@@ -3033,7 +2583,6 @@ def iniciar():
         expr_actual = "".join(ENTRADA_TOKENS)
         cur_ch = _pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS)
         renderizar_pantalla(expr_actual, cursor_pos=cur_ch)
-
 
 if __name__ == "__main__":
     iniciar()
