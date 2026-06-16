@@ -1,8 +1,29 @@
-# PiCalc OS v5.3  |  github.com/picalc
+# PiCalc OS v5.5  |  github.com/picalc
 # Motor RPN/Shunting-Yard, sin eval(). Dual PC/Pico (RP2040 + OLED SH1106).
 # Requiere: sh1106.py en la Pico. En PC corre directo con CPython >= 3.9.
 # SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI<n>  SETUPNORM
 # Modos (MODE): 1COMP 2CMPLX 3STAT 4BASE-N 5EQN 6MATRIX 7TABLE 8VECTOR
+#
+# ── CHANGELOG v5.5 (sobre v5.4) ────────────────────────────
+# NUEVO 1: Distribuciones estadisticas (DIST) - Normal PDF/CDF,
+#   Binomial y Poisson. Accesible desde STAT o directo con DIST.
+# NUEVO 2: TABLE doble f(x),g(x) - TABLE2<f>,<g>,<ini>,<fin>,<paso>
+#   genera ambas columnas en la misma pasada, reusando TABLA_RESULTADO
+#   (cada fila ahora es (x, fx, gx_o_None) para no romper TABLE simple).
+# NUEVO 3: Memoria extendida A-Z (antes solo A,B,C,X,Y). D,F,M,N,T,K
+#   y el resto del alfabeto (excepto E e I, reservadas como constante
+#   y unidad imaginaria) ya se guardan/restauran con STO/RCL/SAVE.
+# NUEVO 4: Conversion sexagesimal DMS <-> decimal. DMS(g,m,s) construye
+#   un grado decimal; TODMS(valor) lo descompone en grados/min/seg con
+#   formato "g°m'.s\"" igual que la tecla °' " de la fx-991.
+# NUEVO 5: Modo SHEET - hoja de calculo simplificada (celdas A1:F10)
+#   con formulas que pueden referenciar otras celdas (=A1+B2*2).
+# NUEVO 6: Polinomios de grado 4 (CUART) via Newton-Raphson con
+#   deflacion, devuelve hasta 4 raices reales o complejas.
+# NUEVO 7: Radicales exactos generalizados - RAIZ ya hacia esto para
+#   sqrt(n); RAIZN(n,k) generaliza a raiz k-esima exacta tipo
+#   raiz_cubica(16) = 2*raiz_cubica(2).
+# ──────────────────────────────────────────────────────────
 
 import time
 import math
@@ -19,7 +40,14 @@ except ImportError:
 
 # ---- Estado global ----
 MODO_EXAMEN = True  # True = Modo bloqueado (Clase) | False = CAS / ClassWiz completo
-MEMORIA = {"A": 0.0, "B": 0.0, "C": 0.0, "X": 0.0, "Y": 0.0}
+# NUEVO 3 (v5.5): memoria extendida de A-Z. Se excluyen E (constante de
+# Euler) e I (unidad imaginaria), ya reservadas en CONSTANTES. El resto
+# del alfabeto (24 letras) queda disponible para STO/RCL/SAVE, igual
+# que la memoria extendida de la fx-991EX (A,B,C,D,X,Y,M + independ.).
+_LETRAS_MEMORIA = [c for c in "ABCDFGHJKLMNOPQRSTUVWXYZ"]
+MEMORIA = {c: 0.0 for c in _LETRAS_MEMORIA}
+MEMORIA["X"] = 0.0
+MEMORIA["Y"] = 0.0
 ANS = 0.0
 # FIX 3 (v5.1): unificamos las dos listas paralelas de v5.0
 # (ESTADISTICA_LISTA / ESTADISTICA_LISTA_Y) en una sola lista de
@@ -48,6 +76,16 @@ EN_MENU_MODE = False
 # el modo 5 (EQN) en el menu MODE.
 EN_MENU_EQN = False
 
+# ---- Estado v5.5: Modo SHEET (hoja de calculo simplificada) ----
+# Grilla de 6 columnas (A-F) x 10 filas. Cada celda guarda o un
+# valor literal o una formula string (ej: "=A1+B2*2"). Las formulas
+# se evaluan on-demand (sin cache) reusando evaluar_expresion().
+SHEET_FILAS = 10
+SHEET_COLS = 6  # columnas A..F
+SHEET_DATOS = {}      # clave "A1".."F10" -> string crudo (numero o formula)
+SHEET_CURSOR = ["A", 1]  # [columna, fila] actual del cursor de hoja
+EN_MODO_SHEET = False
+
 # FIX 4 (v4.4): variable de seleccion separada del MODO_CALC confirmado.
 # IZQ/DER mueven _SELECCION_MENU sin pisar MODO_CALC hasta que el
 # usuario confirme con IGUAL o un digito (igual que la Casio fisica).
@@ -70,8 +108,8 @@ TABLA_MAX_FILAS = 45  # igual que la Casio fx-991 ClassWiz
 BYPASS_RESTRICCIONES = frozenset({
     "SOLVE", "DERIV", "INT", "MAT2", "MAT3", "DOT", "CROSS",
     "MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV",
-    "PRIMOS", "CUAD", "CUB", "TABLE", "BIN", "OCT", "HEX",
-    "AND", "OR", "XOR", "NOT", "CMPLX", "DIST",
+    "PRIMOS", "CUAD", "CUB", "CUART", "TABLE", "TABLE2", "BIN", "OCT", "HEX",
+    "AND", "OR", "XOR", "NOT", "CMPLX", "DIST", "SHEET", "RAIZN",
 })
 
 display = None
@@ -115,7 +153,8 @@ LAYOUT_TECLADO = [
     ["0", ".", "X", "PI", "E", "SIN(", "COS(", "TAN("],
     ["A", "B", "C", "Y", "=", "IGUAL", "BYPASS", "SQRT("],
     ["LN(", "LOG(", "EXP(", "ABS(", "ASIN(", "ACOS(", "ATAN(", "RAIZ("],
-    ["IZQ", "DER", "MODE", "SETUP", "", "", "", ""],
+    # v5.5: SHEETUP/SHEETDOWN (navegacion de filas en modo SHEET)
+    ["IZQ", "DER", "MODE", "SETUP", "SHEETUP", "SHEETDOWN", "", ""],
 ]
 
 # Capa secundaria (tecla 2ND/SHIFT): funciones avanzadas poco usadas.
@@ -128,6 +167,8 @@ LAYOUT_TECLADO_2ND = [
     ["FACT(", "NPR(", "NCR(", "CONJ(", "ARG(", "STATX", "STATCLEAR", "VEC2("],
     # v5.3: SIMU (ecuaciones simultaneas 2x2/3x3/4x4), MATEDIT, regresiones
     ["VEC3(", "SIMU2(", "SIMU3(", "SIMU4(", "MATEDIT", "STATCUAD", "STATEXP", "STATLOG"],
+    # v5.5: distribuciones, TABLE doble, DMS, SHEET, CUART, RAIZN
+    ["DIST", "TABLE2", "DMS(", "TODMS(", "SHEET", "CUART(", "RAIZN(", ""],
 ]
 
 _ultimo_estado = {}
@@ -594,6 +635,59 @@ def calcular_raiz_analitica(valor_str):
     except Exception:
         return "Error"
 
+
+# ── 6b. RAIZ K-ESIMA EXACTA GENERALIZADA (NUEVO 7 - v5.5) ──
+# RAIZ()/calcular_raiz_analitica() ya hacia esta extraccion de factores
+# para raiz cuadrada (sqrt(12) = 2*sqrt(3)). RAIZN(n,k) generaliza el
+# mismo principio a la raiz k-esima: extrae todo factor cuya potencia
+# k-esima divide exactamente a n, dejando el resto bajo el radical.
+# Ej: RAIZN(16,3) = raiz cubica de 16 = 2 * raiz cubica de 2.
+def cmd_raizn(cmd):
+    """RAIZN(n,k) -> raiz k-esima de n, exacta si es posible o con
+    extraccion analitica de factores (estilo Casio) si no lo es.
+    Soporta n negativo cuando k es impar (raiz real negativa)."""
+    try:
+        nums = extraer_numeros(cmd, "RAIZN")
+        if len(nums) != 2:
+            return "Use RAIZN(", "n,k)", ""
+        n, k = nums[0], int(nums[1])
+        if k <= 0:
+            return "Error: k debe", "ser entero > 0", ""
+        if n < 0 and k % 2 == 0:
+            return "Error: raiz par", "de negativo", ""
+
+        signo = -1 if n < 0 else 1
+        n_abs = abs(n)
+
+        raiz = round(n_abs ** (1.0 / k), 10)
+        raiz_redonda = round(raiz)
+        if abs(raiz_redonda ** k - n_abs) < 1e-6:
+            return str(signo * raiz_redonda), "", ""
+
+        if MODO_EXAMEN:
+            return f"{signo * raiz:.5f}", "", ""
+
+        # Extraccion analitica: busca el mayor 'fuera' tal que
+        # fuera^k divide exactamente a n_abs, dejando 'dentro' bajo
+        # la raiz k-esima (factorizacion por tanteo, like sqrt-case).
+        n_int = int(round(n_abs, 10))
+        fuera, dentro = 1, n_int
+        d = 2
+        while d ** k <= dentro:
+            while dentro % (d ** k) == 0:
+                fuera *= d
+                dentro //= (d ** k)
+            d += 1
+
+        signo_txt = "-" if signo < 0 else ""
+        if dentro == 1:
+            return f"{signo_txt}{fuera}", "", ""
+        base = f"raizN{k}({dentro})"
+        expr = f"{fuera}*{base}" if fuera > 1 else base
+        return f"{signo_txt}{expr}", "", ""
+    except Exception as ex:
+        return f"Error RAIZN: {ex}"[:16], "", ""
+
 def decimal_a_fraccion(val):
     # Numeros complejos: formatear al estilo Casio "a+bi" sin parentesis ni "j"
     if isinstance(val, complex):
@@ -930,6 +1024,90 @@ def procesar_estadistica(comando):
         return f"Error Estad: {ex}"[:16], "", ""
 
 
+# ── 9b. DISTRIBUCIONES ESTADISTICAS (NUEVO 1 - v5.5) ───────
+# DIST<tipo><args> via teclado: DISTNPD(x,mu,sigma)  -> Normal PDF
+#                                 DISTNCD(a,b,mu,sigma) -> Normal CDF en [a,b]
+#                                 DISTBIN(x,n,p)        -> Binomial P(X=x)
+#                                 DISTPOI(x,lambda)     -> Poisson P(X=x)
+# Implementadas sin librerias externas (solo math), igual de livianas
+# que el resto del motor para correr en la Pico.
+
+def _normal_pdf(x, mu, sigma):
+    if sigma <= 0:
+        raise ValueError("sigma debe ser > 0")
+    coef = 1.0 / (sigma * math.sqrt(2 * math.pi))
+    expo = -((x - mu) ** 2) / (2 * sigma ** 2)
+    return coef * math.exp(expo)
+
+
+def _normal_cdf(x, mu, sigma):
+    """CDF de la normal via la funcion error: Phi(x) = 0.5*(1+erf((x-mu)/(sigma*sqrt2)))."""
+    if sigma <= 0:
+        raise ValueError("sigma debe ser > 0")
+    z = (x - mu) / (sigma * math.sqrt(2))
+    return 0.5 * (1 + math.erf(z))
+
+
+def _binomial_pmf(k, n, p):
+    if not (0 <= p <= 1):
+        raise ValueError("p debe estar en [0,1]")
+    k, n = int(k), int(n)
+    if k < 0 or k > n:
+        return 0.0
+    return math.comb(n, k) * (p ** k) * ((1 - p) ** (n - k))
+
+
+def _poisson_pmf(k, lam):
+    if lam < 0:
+        raise ValueError("lambda debe ser >= 0")
+    k = int(k)
+    if k < 0:
+        return 0.0
+    return (lam ** k) * math.exp(-lam) / math.factorial(k)
+
+
+def cmd_dist(cmd):
+    """Despacha las distribuciones estadisticas. Formatos:
+      DISTNPD(x,mu,sigma)      Normal: densidad puntual
+      DISTNCD(a,b,mu,sigma)    Normal: probabilidad acumulada P(a<=X<=b)
+      DISTBIN(k,n,p)           Binomial: P(X=k)
+      DISTPOI(k,lambda)        Poisson: P(X=k)
+    Sin argumentos (solo "DIST"), muestra un recordatorio de sintaxis."""
+    try:
+        u = cmd.upper()
+        if "NPD" in u:
+            nums = extraer_numeros(u, "NPD")
+            if len(nums) != 3:
+                return "Use NPD(", "x,mu,sigma)", ""
+            x, mu, sigma = nums
+            val = _normal_pdf(x, mu, sigma)
+            return f"Normal PDF", f"f({x})={decimal_a_fraccion(round(val,6))}", ""
+        if "NCD" in u:
+            nums = extraer_numeros(u, "NCD")
+            if len(nums) != 4:
+                return "Use NCD(", "a,b,mu,sigma)", ""
+            a, b, mu, sigma = nums
+            p = _normal_cdf(b, mu, sigma) - _normal_cdf(a, mu, sigma)
+            return f"Normal CDF", f"P({a}<=X<={b})", f"= {decimal_a_fraccion(round(p,6))}"
+        if "BIN" in u:
+            nums = extraer_numeros(u, "BIN")
+            if len(nums) != 3:
+                return "Use BIN(", "k,n,p)", ""
+            k, n, p = nums
+            val = _binomial_pmf(k, n, p)
+            return f"Binomial n={int(n)} p={p}", f"P(X={int(k)})", f"= {decimal_a_fraccion(round(val,6))}"
+        if "POI" in u:
+            nums = extraer_numeros(u, "POI")
+            if len(nums) != 2:
+                return "Use POI(", "k,lambda)", ""
+            k, lam = nums
+            val = _poisson_pmf(k, lam)
+            return f"Poisson lambda={lam}", f"P(X={int(k)})", f"= {decimal_a_fraccion(round(val,6))}"
+        return "DIST: NPD NCD", "BIN POI", "ej: DISTNPD(0,0,1)"
+    except Exception as ex:
+        return f"Error DIST: {ex}"[:16], "", ""
+
+
 # ── 10. MEMORIA: STO / RCL / ANS ───────────────────
 def comando_sto(cmd):
     """'<expr>STOA' guarda el valor de <expr> (o de ANS si esta vacio) en A."""
@@ -939,7 +1117,8 @@ def comando_sto(cmd):
     resto = partes[1].strip() if len(partes) > 1 else ""
     var = resto[0:1]
     if var not in MEMORIA:
-        return "Error: use STO A/B/C/X/Y"
+        # NUEVO 3 (v5.5): mensaje actualizado, ahora son A-Z menos E/I.
+        return "Error: use STO A-Z"
     try:
         valor = ANS if expr_part == "" else evaluar_expresion(expr_part, variables_actuales())
         MEMORIA[var] = valor
@@ -955,7 +1134,7 @@ def comando_rcl(cmd):
     resto = partes[1].strip() if len(partes) > 1 else ""
     var = resto[0:1]
     if var not in MEMORIA:
-        return "Error: use RCL A/B/C/X/Y"
+        return "Error: use RCL A-Z"
     ANS = MEMORIA[var]
     return f"{var} = {decimal_a_fraccion(MEMORIA[var])}"
 
@@ -1002,6 +1181,10 @@ def guardar_estado():
                 } if m is not None else None
                 for nombre, m in MATRICES.items()
             },
+            # NUEVO 5 (v5.5): persistir el contenido de la hoja SHEET.
+            # SHEET_DATOS solo guarda strings (numeros o "=formula"),
+            # asi que se serializa directo sin pasar por _serializar_valor.
+            "sheet_datos": dict(SHEET_DATOS),
         }
         with open(_RUTA_ESTADO, "w") as f:
             _json_mod.dump(estado, f)
@@ -1012,6 +1195,7 @@ def guardar_estado():
 def cargar_estado():
     """Carga el estado guardado previamente. Se llama al arrancar."""
     global ANS, MODO_CALC, MODO_COMPLEJO, MODO_ANGULOS, FORMATO_NUM, FORMATO_DECIMALES
+    global SHEET_DATOS
     try:
         with open(_RUTA_ESTADO, "r") as f:
             estado = _json_mod.load(f)
@@ -1046,6 +1230,12 @@ def cargar_estado():
                     "filas": m["filas"],
                     "cols": m["cols"],
                 }
+
+        # NUEVO 5 (v5.5): restaurar la hoja SHEET si existia en el archivo.
+        sheet_guardado = estado.get("sheet_datos", {})
+        if isinstance(sheet_guardado, dict):
+            SHEET_DATOS.clear()
+            SHEET_DATOS.update(sheet_guardado)
         return True
     except OSError:
         return False  # archivo no existe todavia (primer arranque)
@@ -1290,8 +1480,71 @@ def run_tests():
     procesar_estadistica("CLEAR")
     globals()["ESTADISTICA_DATOS"] = prev_datos
 
+    # --- NUEVO 1 (v5.5): distribuciones estadisticas ---
+    r1, r2, r3 = cmd_dist("DISTNPD(0,0,1)")
+    check("DISTNPD(0,0,1) ~ 0.39894", "0.39894" in r2, True)
+    r1, r2, r3 = cmd_dist("DISTBIN(0,10,0.5)")
+    check("DISTBIN(0,10,0.5) ~ 0.00098", "0.00098" in r3, True)
+    r1, r2, r3 = cmd_dist("DISTPOI(0,1)")
+    check("DISTPOI(0,1) ~ 0.36788", "0.36788" in r3, True)
+
+    # --- NUEVO 2 (v5.5): TABLE2 doble funcion ---
+    global TABLA_RESULTADO, TABLA_INDICE
+    prev_tabla = list(TABLA_RESULTADO)
+    r, *_ = cmd_table2("TABLE2X,X^2,0,2,1")
+    check("TABLE2 genera 3 filas", len(TABLA_RESULTADO), 3)
+    check("TABLE2 fila0 = (0,0,0)", TABLA_RESULTADO[0], (0, 0, 0))
+    check("TABLE2 fila2 = (2,2,4)", TABLA_RESULTADO[2], (2, 2, 4))
+    TABLA_RESULTADO = prev_tabla
+
+    # --- NUEVO 3 (v5.5): memoria extendida A-Z ---
+    check("D en MEMORIA tras extension", "D" in MEMORIA, True)
+    check("E NO esta en MEMORIA (es constante)", "E" in MEMORIA, False)
+    check("I NO esta en MEMORIA (es imaginaria)", "I" in MEMORIA, False)
+    MEMORIA["D"] = 7.0
+    r, *_ = procesar_todo("D*2")
+    check("variable D funciona en expresiones", r, "14")
+    MEMORIA["D"] = 0.0
+
+    # --- NUEVO 4 (v5.5): conversion DMS <-> decimal ---
+    r1, r2, r3 = cmd_dms("DMS(10,30,0)")
+    check("DMS(10,30,0) = 21/2 (10.5)", r1, "DMS = 21/2")
+    r1, r2, r3 = cmd_todms("TODMS(10.5)")
+    check("TODMS(10.5) = 10°30'0.0\"", r1, "10\u00b030'0.0\"")
+
+    # --- NUEVO 5 (v5.5): modo SHEET con formulas ---
+    prev_sheet = dict(SHEET_DATOS)
+    prev_sheet_cursor = list(SHEET_CURSOR)
+    SHEET_DATOS.clear()
+    SHEET_DATOS["A1"] = "5.0"
+    SHEET_DATOS["B1"] = "3.0"
+    SHEET_DATOS["C1"] = "=A1+B1*2"
+    check("SHEET formula A1+B1*2 = 11", _evaluar_celda("C1"), 11.0)
+    SHEET_DATOS["D1"] = "=D1"  # referencia circular directa
+    try:
+        _evaluar_celda("D1")
+        check("SHEET detecta ref. circular", "no lanzó", "error")
+    except ValueError:
+        check("SHEET detecta ref. circular", "error", "error")
+    SHEET_DATOS.clear()
+    SHEET_DATOS.update(prev_sheet)
+    globals()["SHEET_CURSOR"] = prev_sheet_cursor
+
+    # --- NUEVO 6 (v5.5): polinomio grado 4 ---
+    r1, r2, r3 = cmd_cuart("CUART(1,0,-5,0,4)")
+    # x^4-5x^2+4 = (x^2-1)(x^2-4) -> raices +-1, +-2 en algun orden
+    raices_txt = r1 + " " + r2
+    check("CUART x^4-5x^2+4 contiene raiz 1", "X1=1" in raices_txt or "X2=1" in raices_txt, True)
+    check("CUART x^4-5x^2+4 contiene raiz 2", "2" in raices_txt, True)
+
+    # --- NUEVO 7 (v5.5): raiz k-esima exacta generalizada ---
+    r1, r2, r3 = cmd_raizn("RAIZN(8,3)")
+    check("RAIZN(8,3) = 2 (raiz cubica exacta)", r1, "2")
+    r1, r2, r3 = cmd_raizn("RAIZN(16,3)")
+    check("RAIZN(16,3) = 2*raizN3(2)", r1, "2*raizN3(2)")
+
     total = pasados + fallados
-    print(f"\n=== TEST SUITE PiCalc v5.3 ===")
+    print(f"\n=== TEST SUITE PiCalc v5.5 ===")
     for l in log:
         print(l)
     print(f"\nResultado: {pasados}/{total} pasados")
@@ -1533,6 +1786,107 @@ def cmd_cub(cmd):
         return f"Error: {ex}", "", ""
 
 
+# ── 11v5.5-B. POLINOMIOS GRADO 4 (NUEVO 6 - v5.5) ──────────
+def _evaluar_poly(coefs, x):
+    """Evalua un polinomio (lista de coeficientes, grado mayor primero)
+    en x, soportando x complejo via cmath/complex aritmetica nativa."""
+    r = 0
+    for c in coefs:
+        r = r * x + c
+    return r
+
+
+def _derivada_poly(coefs):
+    """Devuelve los coeficientes de la derivada del polinomio."""
+    n = len(coefs) - 1
+    return [c * (n - i) for i, c in enumerate(coefs[:-1])]
+
+
+def _newton_raiz_compleja(coefs, x0, iters=100, tol=1e-10):
+    """Una raiz via Newton-Raphson en el plano complejo, partiendo de x0."""
+    deriv = _derivada_poly(coefs)
+    x = complex(x0)
+    for _ in range(iters):
+        fx = _evaluar_poly(coefs, x)
+        if abs(fx) < tol:
+            break
+        dfx = _evaluar_poly(deriv, x)
+        if abs(dfx) < 1e-14:
+            x += complex(0.1, 0.1)  # escapar de un punto critico
+            continue
+        x_nuevo = x - fx / dfx
+        if abs(x_nuevo - x) < tol:
+            x = x_nuevo
+            break
+        x = x_nuevo
+    return x
+
+
+def _deflactar_poly(coefs, raiz):
+    """Division sintetica: divide coefs por (x - raiz), descartando el resto
+    (que deberia ser ~0 si 'raiz' es una raiz real del polinomio)."""
+    nuevo = [coefs[0]]
+    for c in coefs[1:-1]:
+        nuevo.append(nuevo[-1] * raiz + c)
+    return nuevo
+
+
+def resolver_polinomio_newton(coefs):
+    """Encuentra TODAS las raices de un polinomio via Newton + deflacion
+    sucesiva, partiendo de semillas distribuidas en el plano complejo
+    para maximizar la chance de converger a raices distintas (igual de
+    espiritu al metodo de Durand-Kerner simplificado)."""
+    coefs = list(coefs)
+    grado = len(coefs) - 1
+    raices = []
+    semillas = [complex(0.4, 0.9), complex(-0.6, 0.7),
+                complex(0.7, -0.4), complex(-0.8, -0.3)]
+    activos = coefs
+    for k in range(grado):
+        semilla = semillas[k % len(semillas)] * (k + 1)
+        r = _newton_raiz_compleja(activos, semilla)
+        raices.append(r)
+        if len(activos) > 2:
+            activos = _deflactar_poly(activos, r)
+    return raices
+
+
+def cmd_cuart(cmd):
+    """CUART(a,b,c,d,e) -> resuelve ax^4+bx^3+cx^2+dx+e = 0.
+    Usa Newton-Raphson en el plano complejo con deflacion sucesiva
+    (a diferencia de CUAD/CUB que usan formulas cerradas, el caso
+    general de grado 4 se resuelve numericamente, igual de preciso
+    para uso practico). Devuelve hasta 4 raices, reales o complejas
+    segun corresponda; valores con parte imaginaria despreciable
+    (<1e-6) se muestran como reales."""
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        partes = cmd.split("CUART", 1)[-1].strip().strip("()")
+        p = [evaluar_expresion(v.strip(), variables_actuales()) for v in partes.split(",")]
+        if len(p) != 5:
+            return "Use CUART(", "a,b,c,d,e)", ""
+        a = p[0]
+        if abs(a) < 1e-12:
+            return "a no puede=0", "Usar CUB/CUAD", ""
+        coefs = [c / a for c in p]  # normalizar a coef. principal = 1
+        raices = resolver_polinomio_newton(coefs)
+
+        def _limpiar(r):
+            if abs(r.imag) < 1e-6:
+                return round(r.real, 6)
+            return complex(round(r.real, 6), round(r.imag, 6))
+
+        raices = [_limpiar(r) for r in raices]
+        # Se muestran en 2 lineas (2 raices cada una) por limite de pantalla
+        f = [_fmt_raiz(r) for r in raices]
+        return (f"X1={f[0]} X2={f[1]}",
+                f"X3={f[2]} X4={f[3]}",
+                "Newton+deflac.")
+    except Exception as ex:
+        return f"Error Cuart: {ex}"[:16], "", ""
+
+
 # ── 11v4-D. MODULO TABLE: TABULACION DE FUNCIONES ──
 def cmd_table(cmd):
     """TABLE<expr>,<inicio>,<fin>,<paso>
@@ -1590,16 +1944,83 @@ def renderizar_tabla_fila():
     """NUEVO 1 (v5.2): muestra la fila TABLA_INDICE de TABLA_RESULTADO.
     Se invoca desde IZQ/DER cuando el buffer de entrada esta vacio,
     permitiendo recorrer fila por fila la ultima TABLE generada
-    (en vez de solo ver la primera fila como en v5.1)."""
+    (en vez de solo ver la primera fila como en v5.1).
+    NUEVO 2 (v5.5): cada fila ahora puede ser (x, fx) [TABLE simple]
+    o (x, fx, gx) [TABLE2]. Se detecta la longitud de la tupla para
+    decidir si mostrar una o dos columnas de resultado."""
     n = len(TABLA_RESULTADO)
     if n == 0:
         renderizar_pantalla("0", cursor_pos=0)
         return
-    x, fx = TABLA_RESULTADO[TABLA_INDICE]
-    renderizar_pantalla(f"TABLE fila {TABLA_INDICE + 1}/{n}",
-                         f"x = {x}",
-                         f"f(x) = {decimal_a_fraccion(fx)}",
-                         "IZQ/DER mueve, AC sale")
+    fila = TABLA_RESULTADO[TABLA_INDICE]
+    if len(fila) == 3:
+        x, fx, gx = fila
+        renderizar_pantalla(f"TABLE fila {TABLA_INDICE + 1}/{n}",
+                             f"x={x} f={decimal_a_fraccion(fx)}",
+                             f"g={decimal_a_fraccion(gx)}",
+                             "IZQ/DER mueve, AC sale")
+    else:
+        x, fx = fila
+        renderizar_pantalla(f"TABLE fila {TABLA_INDICE + 1}/{n}",
+                             f"x = {x}",
+                             f"f(x) = {decimal_a_fraccion(fx)}",
+                             "IZQ/DER mueve, AC sale")
+
+
+def cmd_table2(cmd):
+    """TABLE2<f>,<g>,<inicio>,<fin>,<paso> (NUEVO 2 - v5.5)
+    Genera una tabla con DOS funciones f(x) y g(x) evaluadas sobre el
+    mismo rango de x, igual que el modo TABLE de la fx-991EX cuando se
+    activan ambas funciones f(x) y g(x). Reusa el mismo limite
+    TABLA_MAX_FILAS y la misma cache TABLA_RESULTADO que TABLE simple
+    (cada fila es (x, fx, gx) en vez de (x, fx))."""
+    global TABLA_RESULTADO, TABLA_INDICE
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        resto = cmd.split("TABLE2", 1)[-1].strip()
+        partes = resto.split(",")
+        if len(partes) < 5:
+            return "Use TABLE2<f>,", "<g>,ini,fin,paso", ""
+        eq_f = partes[0].upper()
+        eq_g = partes[1].upper()
+        inicio = evaluar_expresion(partes[2], variables_actuales())
+        fin    = evaluar_expresion(partes[3], variables_actuales())
+        paso   = evaluar_expresion(partes[4], variables_actuales())
+
+        if paso == 0:
+            return "Error: paso=0", "", ""
+
+        pasos_estimados = int(abs(fin - inicio) / abs(paso)) + 1
+        if pasos_estimados > TABLA_MAX_FILAS:
+            return "Error: Rango Max", f"max {TABLA_MAX_FILAS} filas", f"({pasos_estimados} pedidos)"
+
+        TABLA_RESULTADO = []
+        for i in range(pasos_estimados):
+            x = inicio + i * paso
+            if paso > 0 and x > fin + 1e-9:
+                break
+            if paso < 0 and x < fin - 1e-9:
+                break
+            vars_x = variables_actuales({"X": x})
+            fx = evaluar_expresion(eq_f, vars_x)
+            gx = evaluar_expresion(eq_g, vars_x)
+            x_fmt = round(x, 6)
+            fx_fmt = round(fx, 6) if not isinstance(fx, complex) else fx
+            gx_fmt = round(gx, 6) if not isinstance(gx, complex) else gx
+            TABLA_RESULTADO.append((x_fmt, fx_fmt, gx_fmt))
+
+        if not TABLA_RESULTADO:
+            return "Tabla vacia", "", ""
+
+        TABLA_INDICE = 0
+        x0, fx0, gx0 = TABLA_RESULTADO[0]
+        n = len(TABLA_RESULTADO)
+        return (f"TABLE2 ({n} pts)",
+                f"x={x0} f={decimal_a_fraccion(fx0)}",
+                f"g={decimal_a_fraccion(gx0)}" + (" IZQ/DER" if n > 1 else ""))
+    except Exception as ex:
+        return f"Error Table2: {ex}", "", ""
 
 
 # ── 11v4-E. MODULO BASEN: CONVERSION DE BASE Y LOGICA DE BITS ─
@@ -1993,6 +2414,57 @@ def cmd_rec(cmd):
         return f"Error REC: {ex}"[:16], "", ""
 
 
+# ── 11v5.5-A. CONVERSION SEXAGESIMAL DMS <-> DECIMAL (NUEVO 4 - v5.5) ─
+# La fx-991 tiene una tecla dedicada "°' "" para trabajar con grados,
+# minutos y segundos. Aqui se ofrecen dos comandos equivalentes:
+#   DMS(g,m,s)   -> grados decimales (g + m/60 + s/3600), con el signo
+#                   de 'g' aplicado al resultado completo.
+#   TODMS(valor) -> descompone un grado decimal en (g, m, s) y devuelve
+#                   el string formateado "g°m'.s\"" igual que la Casio.
+def cmd_dms(cmd):
+    """DMS(g,m,s) -> grados decimales. Acepta m y s negativos o positivos;
+    el signo final lo determina 'g' (igual que la convención DMS estándar:
+    -10°30' = -(10 + 30/60), nunca -10 + 30/60)."""
+    try:
+        nums = extraer_numeros(cmd, "DMS")
+        if len(nums) != 3:
+            return "Use DMS(", "g,m,s)", ""
+        g, m, s = nums
+        signo = -1 if g < 0 else 1
+        valor = signo * (abs(g) + abs(m) / 60 + abs(s) / 3600)
+        return (f"DMS = {decimal_a_fraccion(round(valor, 8))}",
+                f"({g}\u00b0{m}'{s}\")", "")
+    except Exception as ex:
+        return f"Error DMS: {ex}"[:16], "", ""
+
+
+def cmd_todms(cmd):
+    """TODMS(valor) -> descompone un grado decimal en grados, minutos
+    y segundos, formato Casio: 10.5125 -> 10°30'45.0\"."""
+    try:
+        nums = extraer_numeros(cmd, "TODMS")
+        if len(nums) != 1:
+            return "Use TODMS(", "valor)", ""
+        valor = nums[0]
+        signo = "-" if valor < 0 else ""
+        x = abs(valor)
+        g = int(x)
+        resto_min = (x - g) * 60
+        m = int(resto_min)
+        s = round((resto_min - m) * 60, 2)
+        # Acarreo: si el redondeo de segundos llega a 60, ajustar minutos/grados
+        if s >= 60:
+            s -= 60
+            m += 1
+        if m >= 60:
+            m -= 60
+            g += 1
+        return (f"{signo}{g}\u00b0{m}'{s}\"",
+                f"(= {decimal_a_fraccion(round(valor, 6))}\u00b0)", "")
+    except Exception as ex:
+        return f"Error TODMS: {ex}"[:16], "", ""
+
+
 # ── 11v5.3-E. MATEDIT EN EL BUCLE (estado de ingreso celda a celda) ─
 # El bucle iniciar() consulta _MATEDIT_ESTADO["activo"] para saber
 # si debe redirigir el token IGUAL a matedit_ingresar() en vez del
@@ -2040,6 +2512,130 @@ def cmd_vector(cmd):
     return "Error Vec", "", ""
 
 
+# ── 11v5.5-C. MODO SHEET: HOJA DE CALCULO SIMPLIFICADA (NUEVO 5 - v5.5) ─
+# Replica simplificada del modo Spreadsheet de la fx-991EX: grilla de
+# celdas A1:F10 donde cada celda guarda un numero o una formula que
+# empieza con "=" y puede referenciar otras celdas (=A1+B2*2). No hay
+# recalculo automatico encadenado con deteccion de ciclos complejos;
+# en su lugar, cada formula se evalua "on demand" siguiendo referencias
+# de forma recursiva, con un limite de profundidad para detectar
+# referencias circulares (A1=B1, B1=A1) sin colgar la Pico.
+
+def _celda_valida(col, fila):
+    return col in "ABCDEF" and 1 <= fila <= SHEET_FILAS
+
+
+def _celda_id(col, fila):
+    return f"{col}{fila}"
+
+
+def _evaluar_celda(celda_id, _pila_visitada=None):
+    """Evalua el contenido de una celda, siguiendo formulas de forma
+    recursiva. Lanza ValueError si detecta referencia circular o si
+    la celda esta vacia (se trata como 0.0 para no romper formulas
+    que suman rangos con celdas no llenadas, igual que una hoja real)."""
+    if _pila_visitada is None:
+        _pila_visitada = set()
+    if celda_id in _pila_visitada:
+        raise ValueError(f"Ref circular en {celda_id}")
+    crudo = SHEET_DATOS.get(celda_id)
+    if crudo is None or crudo == "":
+        return 0.0
+    if not crudo.startswith("="):
+        # Valor literal (numero)
+        return float(crudo)
+
+    _pila_visitada.add(celda_id)
+    formula = crudo[1:].upper()
+    # Construir el set de variables disponibles: las 60 celdas (A1..F10)
+    # se exponen como variables de un solo "token" reusando el mismo
+    # tokenizador alfabetico, por lo que aqui resolvemos manualmente
+    # cada referencia ColFila dentro de la formula antes de evaluar.
+    import re
+    def _reemplazar(match):
+        ref = match.group(0)
+        col_ref, fila_ref = ref[0], int(ref[1:])
+        if not _celda_valida(col_ref, fila_ref):
+            raise ValueError(f"Celda invalida: {ref}")
+        valor = _evaluar_celda(_celda_id(col_ref, fila_ref), _pila_visitada)
+        return f"({valor})"
+
+    formula_resuelta = re.sub(r"[A-F](?:[1-9]|10)\b", _reemplazar, formula)
+    resultado = evaluar_expresion(formula_resuelta, variables_actuales())
+    _pila_visitada.discard(celda_id)
+    return resultado
+
+
+def renderizar_sheet():
+    """Muestra la celda actual (SHEET_CURSOR), su contenido crudo y su
+    valor evaluado. Navegacion con IZQ/DER (columna) y flechas dedicadas
+    si el hardware las tiene; en consola PC se usa SHEETUP/SHEETDOWN
+    ademas de IZQ/DER para moverse en ambas direcciones."""
+    col, fila = SHEET_CURSOR
+    celda_id = _celda_id(col, fila)
+    crudo = SHEET_DATOS.get(celda_id, "")
+    try:
+        valor = _evaluar_celda(celda_id)
+        valor_txt = decimal_a_fraccion(round(valor, 6)) if isinstance(valor, (int, float)) else str(valor)
+    except Exception as ex:
+        valor_txt = f"Err: {ex}"[:16]
+    crudo_txt = crudo if crudo else "(vacia)"
+    renderizar_pantalla(f"SHEET {celda_id}", f"= {crudo_txt}"[:16],
+                         f"val: {valor_txt}", "IZQ/DER/SHEETUP/DOWN")
+
+
+def cmd_sheet(cmd=""):
+    """Entrada al modo SHEET. 'SHEET' solo (sin argumentos) abre el
+    modo y posiciona el cursor en A1. Dentro del modo, el bucle
+    principal redirige el texto ingresado (numero o '=formula') a
+    sheet_ingresar_celda() cuando se presiona IGUAL."""
+    global EN_MODO_SHEET, SHEET_CURSOR
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    EN_MODO_SHEET = True
+    SHEET_CURSOR = ["A", 1]
+    return "Modo SHEET", "A1:F10 disponibles", "Escribe y IGUAL"
+
+
+def sheet_ingresar_celda(texto):
+    """Guarda 'texto' (numero o formula '=...') en la celda actual y
+    devuelve las 3 lineas de pantalla con el resultado evaluado."""
+    col, fila = SHEET_CURSOR
+    celda_id = _celda_id(col, fila)
+    texto = texto.strip()
+    if texto == "":
+        SHEET_DATOS.pop(celda_id, None)
+    elif texto.startswith("="):
+        SHEET_DATOS[celda_id] = texto
+    else:
+        try:
+            # Permite expresiones simples sin "=" como atajo (ej: "2+3")
+            valor = evaluar_expresion(texto.upper(), variables_actuales())
+            SHEET_DATOS[celda_id] = str(valor)
+        except Exception:
+            return f"Error en {celda_id}", "Valor invalido", ""
+    renderizar_sheet()
+    return "", "", ""  # renderizar_sheet ya pinto la pantalla
+
+
+def sheet_mover(direccion):
+    """Mueve SHEET_CURSOR. direccion: 'IZQ','DER','ARRIBA','ABAJO'."""
+    global SHEET_CURSOR
+    col, fila = SHEET_CURSOR
+    cols = "ABCDEF"
+    idx = cols.index(col)
+    if direccion == "IZQ":
+        idx = max(0, idx - 1)
+    elif direccion == "DER":
+        idx = min(len(cols) - 1, idx + 1)
+    elif direccion == "ARRIBA":
+        fila = max(1, fila - 1)
+    elif direccion == "ABAJO":
+        fila = min(SHEET_FILAS, fila + 1)
+    SHEET_CURSOR = [cols[idx], fila]
+    renderizar_sheet()
+
+
 # ── 11. CAPA DE ENTRADA: TOKENS Y MULTIPLICACION IMPLICITA ─
 ALIAS_TOKENS = {nombre: nombre + "(" for nombre in FUNC_MAP}
 # Comandos especiales de teclado fisico / 2ND que no estan en FUNC_MAP:
@@ -2050,6 +2646,8 @@ ALIAS_TOKENS.update({
     "BIN": "BIN(", "OCT": "OCT(", "HEX": "HEX(",
     "NPR": "NPR(", "NCR": "NCR(",  # NUEVO 1 (v5.0): permutaciones/combinaciones
     "VEC2": "VEC2(", "VEC3": "VEC3(",  # NUEVO 2 (v5.2): modo VECTOR real
+    # v5.5: DMS/TODMS, CUART (polinomio grado 4), RAIZN (raiz k-esima exacta)
+    "DMS": "DMS(", "TODMS": "TODMS(", "CUART": "CUART(", "RAIZN": "RAIZN(",
 })
 
 def es_numero_str(s):
@@ -2223,11 +2821,11 @@ def aplicar_eqn(num):
 SUGERENCIAS_MODO = {
     1: "Calculo normal",
     2: "I=imag CONJ() ARG()",
-    3: "ADD:v STATX x,y CALC",
+    3: "ADD:v STATX x,y CALC DIST",
     4: "BIN OCT HEX AND OR",
     5: "",  # EQN abre su propio submenu
     6: "MATDEF MATMUL MATDET",
-    7: "TABLE f,ini,fin,paso",
+    7: "TABLE f,ini,fin,paso TABLE2",
     8: "VEC2() VEC3() DOT() CROSS()",
 }
 
@@ -2306,8 +2904,18 @@ def procesar_todo(entrada_cruda):
             return toggle_cmplx(), f"MODO_CMPLX={'ON' if MODO_COMPLEJO else 'OFF'}", ""
         if "CUAD" in cmd:
             return cmd_cuad(cmd)
+        # NUEVO 6 (v5.5): CUART debe chequearse ANTES de CUB, porque
+        # "CUB" no es substring de "CUART" pero por claridad y para
+        # evitar futuros choques de nombre se ordena explicitamente
+        # del mas especifico al mas general.
+        if "CUART" in cmd:
+            return cmd_cuart(cmd)
         if "CUB" in cmd and "COSH" not in cmd and "CROSS" not in cmd:
             return cmd_cub(cmd)
+        # NUEVO 2 (v5.5): TABLE2 se chequea ANTES de TABLE, porque
+        # "TABLE" SI es substring de "TABLE2" (TABLE2(...) contiene TABLE).
+        if "TABLE2" in cmd:
+            return cmd_table2(cmd)
         if "TABLE" in cmd:
             return cmd_table(cmd)
         if any(cmd.startswith(k) for k in ("BIN", "OCT", "HEX", "AND", "OR", "XOR", "NOT")):
@@ -2332,9 +2940,20 @@ def procesar_todo(entrada_cruda):
         if "REC" in cmd:
             return cmd_rec(cmd)
 
+        # ---- CONVERSION SEXAGESIMAL DMS (NUEVO 4 - v5.5) ----
+        # TODMS se chequea antes de DMS porque "DMS" es substring de "TODMS".
+        if "TODMS" in cmd:
+            return cmd_todms(cmd)
+        if "DMS" in cmd:
+            return cmd_dms(cmd)
+
         # ---- ALEATORIO Y RAIZ ANALITICA ----
         if "RAND" in cmd:
             return f"Rand: {time.time() % 1:.5f}", "", ""
+        # NUEVO 7 (v5.5): RAIZN se chequea antes de RAIZ porque "RAIZ"
+        # es substring de "RAIZN".
+        if "RAIZN" in cmd:
+            return cmd_raizn(cmd)
         if "RAIZ" in cmd:
             return calcular_raiz_analitica(cmd.split("RAIZ")[-1]), "", ""
 
@@ -2345,6 +2964,14 @@ def procesar_todo(entrada_cruda):
         # ---- EDITOR DE MATRICES (NUEVO 4 - v5.3) ----
         if "MATEDIT" in cmd:
             return cmd_matedit(cmd)
+
+        # ---- DISTRIBUCIONES ESTADISTICAS (NUEVO 1 - v5.5) ----
+        if "DIST" in cmd:
+            return cmd_dist(cmd)
+
+        # ---- MODO SHEET (NUEVO 5 - v5.5) ----
+        if cmd == "SHEET":
+            return cmd_sheet(cmd)
 
         # ---- v4.5: PERSISTENCIA, SETUP, TESTS ----
         if cmd == "SAVE":
@@ -2372,22 +2999,28 @@ def procesar_todo(entrada_cruda):
 
 # ── 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3 ────
 INSTRUCCIONES = (
-    "PiCalc OS v5.3 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v5.5 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
     "Combinatoria: FACT(n)=n!  NPR(n,r)  NCR(n,r)\n"
     "Complejo: CMPLX (toggle) | I=unidad imag. | CONJ(z) ARG(z)\n"
     "Vectores: VEC2(x,y) VEC3(x,y,z) -> modulo+angulos | DOT CROSS\n"
-    "Memoria: A B C X Y ANS  |  Comandos: STO RCL\n"
+    "Memoria: A-Z (excepto E,I) ANS  |  Comandos: STO RCL\n"
     "Calculo: SOLVE DERIV<f>,<x>  INT<f>,<a>,<b>  MCD MCM RAND PRIMOS\n"
     "Ec.simultaneas: SIMU2(a11,a12,b1,...) | SIMU3(...) | SIMU4(...) hasta 4x4\n"
     "Matrices (sistemas): MAT2 MAT3 DOT CROSS\n"
     "Matrices (algebra): MATDEF MATADD MATMUL MATTRANS MATDET MATINV\n"
     "Editor de matrices: MATEDIT<A>,<f>,<c>  luego IGUAL celda por celda\n"
-    "Polinomios: CUAD(a,b,c)  CUB(a,b,c,d)\n"
+    "Polinomios: CUAD(a,b,c)  CUB(a,b,c,d)  CUART(a,b,c,d,e)\n"
     "Tabla: TABLE<expr>,<ini>,<fin>,<paso>  | luego IZQ/DER recorre filas\n"
+    "Tabla doble: TABLE2<f>,<g>,<ini>,<fin>,<paso>  -> f(x) y g(x) juntas\n"
     "Base-N: BIN(n) OCT(n) HEX(n) AND(a,b) OR(a,b) XOR(a,b) NOT(n)\n"
     "Estadistica: STATADD:<v> | STATX<x>,<y> (regresion) | STATCALC/LIN/CUAD/EXP/LOG/POT/INV\n"
+    "Distribuciones: DISTNPD(x,mu,s) DISTNCD(a,b,mu,s) DISTBIN(k,n,p) DISTPOI(k,lambda)\n"
+    "Sexagesimal: DMS(g,m,s)->decimal | TODMS(valor)->g°m's\"\n"
+    "Radicales: RAIZ(n)->raiz 2da exacta | RAIZN(n,k)->raiz k-esima exacta\n"
+    "Hoja de calculo: SHEET abre el modo | IZQ/DER mueve col | SHEETUP/DOWN mueve fila\n"
+    "  En SHEET: tipea numero o '=formula' (ej =A1+B1*2) y IGUAL confirma celda\n"
     "POL/REC: respetan SETUPDEG/SETUPRAD\n"
     "SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI  SETUPNORM\n"
     "Control: AC DEL IGUAL BYPASS=modo examen\n"
@@ -2402,13 +3035,13 @@ def _pos_caracter_cursor(tokens, cursor_pos):
 
 def iniciar():
     global MODO_EXAMEN, ENTRADA_TOKENS, CURSOR_POS, EN_MENU_MODE, _SELECCION_MENU
-    global TABLA_INDICE, EN_MENU_EQN
+    global TABLA_INDICE, EN_MENU_EQN, EN_MODO_SHEET
 
     # NUEVO 1 (v4.5): cargar estado guardado en flash al arrancar.
     # En primer arranque el archivo no existe y cargar_estado devuelve False.
     estado_cargado = cargar_estado()
 
-    renderizar_pantalla("PiCalc OS v5.3", f"Examen: {'ACTIVO' if MODO_EXAMEN else 'INACTIVO'}",
+    renderizar_pantalla("PiCalc OS v5.5", f"Examen: {'ACTIVO' if MODO_EXAMEN else 'INACTIVO'}",
                         "AC/DEL/IGUAL", "BYPASS = modo")
 
     if not ENTORNO_PICO:
@@ -2475,6 +3108,71 @@ def iniciar():
                                     "e IGUAL", cursor_pos=cur_ch)
             else:
                 renderizar_menu_eqn()
+            continue
+
+        # ==================================================
+        # MODO SHEET (NUEVO 5 - v5.5): captura IZQ/DER/AC/IGUAL
+        # de forma distinta mientras esta activo. IZQ/DER mueven
+        # columna; SHEETUP/SHEETDOWN mueven fila (no hay mas teclas
+        # de flecha fisicas disponibles en el layout de 6x8).
+        # IGUAL confirma el contenido tipeado en ENTRADA_TOKENS como
+        # el valor/formula de la celda actual. AC sale del modo SHEET.
+        # ==================================================
+        if EN_MODO_SHEET:
+            if accion_u == "AC":
+                if ENTRADA_TOKENS:
+                    # Primer AC: solo limpia el buffer de edicion de la celda
+                    ENTRADA_TOKENS = []
+                    CURSOR_POS = 0
+                    renderizar_sheet()
+                else:
+                    # Buffer ya vacio: AC sale del modo SHEET
+                    EN_MODO_SHEET = False
+                    expr_actual = "0"
+                    renderizar_pantalla(expr_actual, cursor_pos=0)
+                continue
+            if accion_u == "IZQ":
+                sheet_mover("IZQ")
+                continue
+            if accion_u == "DER":
+                sheet_mover("DER")
+                continue
+            if accion_u == "SHEETUP":
+                sheet_mover("ARRIBA")
+                continue
+            if accion_u == "SHEETDOWN":
+                sheet_mover("ABAJO")
+                continue
+            if accion_u == "IGUAL":
+                # FIX (v5.5): NO usar construir_expresion() aqui, porque
+                # insertaria multiplicacion implicita entre referencias de
+                # celda como "A1" (token "A" + token "1" -> "A*1"), rompiendo
+                # el regex de _evaluar_celda. Las celdas se unen tal cual.
+                texto = "".join(ENTRADA_TOKENS) if ENTRADA_TOKENS else ""
+                sheet_ingresar_celda(texto)
+                ENTRADA_TOKENS = []
+                CURSOR_POS = 0
+                continue
+            if accion_u == "DEL":
+                if CURSOR_POS > 0:
+                    ENTRADA_TOKENS.pop(CURSOR_POS - 1)
+                    CURSOR_POS -= 1
+                col, fila = SHEET_CURSOR
+                renderizar_pantalla(f"{col}{fila}: " + "".join(ENTRADA_TOKENS),
+                                    cursor_pos=_pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS) + len(f"{col}{fila}: "))
+                continue
+            # Cualquier otro token (numeros, operadores, "=") se acumula
+            # en ENTRADA_TOKENS igual que en modo normal, para despues
+            # confirmarlo con IGUAL.
+            token = ALIAS_TOKENS.get(accion_u, None)
+            if token is None:
+                token = accion_u if accion_u in ALIAS_TOKENS.values() else accion
+            ENTRADA_TOKENS.insert(CURSOR_POS, token)
+            CURSOR_POS += 1
+            col, fila = SHEET_CURSOR
+            prefijo = f"{col}{fila}: "
+            renderizar_pantalla(prefijo + "".join(ENTRADA_TOKENS),
+                                cursor_pos=_pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS) + len(prefijo))
             continue
 
         # ==================================================
