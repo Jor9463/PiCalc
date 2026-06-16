@@ -118,6 +118,10 @@ El firmware ha evolucionado a través de dos grandes etapas: la etapa de **Simul
     * **CORRECCIÓN EN FORMATEO DE PANTALLA (`SCI` / `NORM`):** Se reescribió la función fundamental `formatear_numero_setup()` corrigiendo fallos de desborde y falsos truncamientos visuales. Ahora el sistema procesa de forma precisa la separación de mantisa y exponente en notación científica (`SCI`) respetando estrictamente los dígitos significativos elegidos por el usuario de 0 a 9.
     * **ESTABILIZACIÓN DEL DELIMITADOR DINÁMICO:** Reparación del bug crítico vinculado a `_LIMIT_SCI_NORM` que generaba comportamientos inesperados en las salidas decimales estándar. Las transiciones entre el formato condensado y el formato expandido (`NORM 1` y `NORM 2`) ahora responden a los umbrales matemáticos correctos sin pisotear la memoria temporal.
     * **REGLAS DE TRUNCAMIENTO SEGURO:** Optimización de la lógica para limpiar los restos flotantes redundantes (como los molestos `.0`) en números enteros grandes o aproximaciones muy cercanas a cero, garantizando una salida gráfica ultra limpia en la pantalla OLED.
+* **picalc_os_v5.2 (Gestión Dinámica de Heap y Prevención de MemoryError):**
+    * **MONITOREO DE RAM EN TIEMPO REAL:** Integración del módulo de recolección de basura `gc` (Garbage Collector). Se diseñó la función interna `MOSTRAR_MEM_DISP()` para calcular de forma dinámica los bytes libres en el Heap del microcontrolador.
+    * **PREVENCIÓN DE DESBORDES DE PILA:** El menú de estadísticas (`STAT`) y el generador de tablas de funciones (`TABLE`) ahora realizan un chequeo preventivo de memoria RAM disponible antes de poblar listas extensas, evitando congelamientos críticos o excepciones de tipo `MemoryError`.
+    * **OPTIMIZACIÓN MANUAL DEL RECOLECTOR:** Inserción de llamadas explícitas a `gc.collect()` en los puntos de retorno de operaciones matriciales pesadas y limpiezas de búfer (`AC`), liberando bloques residuales de memoria muerta de manera inmediata.
     * 
 ---
 
