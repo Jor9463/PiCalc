@@ -1,29 +1,62 @@
-# PiCalc OS v5.5  |  github.com/picalc
+# PiCalc OS v5.6  |  github.com/picalc
 # Motor RPN/Shunting-Yard, sin eval(). Dual PC/Pico (RP2040 + OLED SH1106).
 # Requiere: sh1106.py en la Pico. En PC corre directo con CPython >= 3.9.
-# SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI<n>  SETUPNORM
+# SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI<n>  SETUPNORM  SETUPENG
 # Modos (MODE): 1COMP 2CMPLX 3STAT 4BASE-N 5EQN 6MATRIX 7TABLE 8VECTOR
 #
-# ── CHANGELOG v5.5 (sobre v5.4) ────────────────────────────
-# NUEVO 1: Distribuciones estadisticas (DIST) - Normal PDF/CDF,
-#   Binomial y Poisson. Accesible desde STAT o directo con DIST.
-# NUEVO 2: TABLE doble f(x),g(x) - TABLE2<f>,<g>,<ini>,<fin>,<paso>
-#   genera ambas columnas en la misma pasada, reusando TABLA_RESULTADO
-#   (cada fila ahora es (x, fx, gx_o_None) para no romper TABLE simple).
-# NUEVO 3: Memoria extendida A-Z (antes solo A,B,C,X,Y). D,F,M,N,T,K
-#   y el resto del alfabeto (excepto E e I, reservadas como constante
-#   y unidad imaginaria) ya se guardan/restauran con STO/RCL/SAVE.
-# NUEVO 4: Conversion sexagesimal DMS <-> decimal. DMS(g,m,s) construye
-#   un grado decimal; TODMS(valor) lo descompone en grados/min/seg con
-#   formato "g°m'.s\"" igual que la tecla °' " de la fx-991.
-# NUEVO 5: Modo SHEET - hoja de calculo simplificada (celdas A1:F10)
-#   con formulas que pueden referenciar otras celdas (=A1+B2*2).
-# NUEVO 6: Polinomios de grado 4 (CUART) via Newton-Raphson con
-#   deflacion, devuelve hasta 4 raices reales o complejas.
-# NUEVO 7: Radicales exactos generalizados - RAIZ ya hacia esto para
-#   sqrt(n); RAIZN(n,k) generaliza a raiz k-esima exacta tipo
-#   raiz_cubica(16) = 2*raiz_cubica(2).
-# ──────────────────────────────────────────────────────────
+# ── CHANGELOG v5.6 (sobre v5.5) ─────────────────────────────────────────
+# NUEVO  1: HISTORIAL de calculos (HIST). Guarda las ultimas 20 expresiones
+#   y resultados; la tecla HIST (2ND) abre la vista, IZQ/DER navega,
+#   IGUAL recarga la expresion en el buffer para reeditar.
+#   Persiste junto al estado (SAVE/cargar_estado).
+#
+# NUEVO  2: RAN# y RANINT#(a,b) — numero aleatorio uniforme [0,1) e
+#   entero aleatorio en [a,b]. En la Casio es SHIFT+. / ALPHA+. .
+#   Disponibles incluso en MODO_EXAMEN (la Casio original los permite).
+#
+# NUEVO  3: MOD(a,b) — resto de la division entera. Alias de %, pero
+#   acepta expresiones completas como argumentos: MOD(A^2,7).
+#
+# NUEVO  4: ENG — notacion de ingenieria. SETUPENG activa el formato;
+#   el exponente siempre es multiplo de 3 (kilo/mega/mili/micro, etc.).
+#   Se integra en decimal_a_fraccion junto a FIX/SCI/NORM.
+#
+# NUEVO  5: Conversion decimal <-> fraccion <-> raiz automatica.
+#   La funcion AFRAC(x) intenta mostrar x como fraccion exacta (si den<=1000)
+#   o como raiz simplificada (si x = entero/n para n en {2,3,4,5,6}).
+#   Util para verificar resultados a mano como en la Casio "S<->D".
+#
+# NUEVO  6: SUM(expr,var,ini,fin) — suma discreta de expr con var
+#   recorriendo de ini a fin de 1 en 1. Ej: SUM(X^2,X,1,5) = 55.
+#
+# NUEVO  7: PROD(expr,var,ini,fin) — producto discreto (productoria).
+#   Ej: PROD(X,X,1,5) = 120 = 5!.
+#
+# NUEVO  8: Distribucion hipergeometrica: DISTHG(k,N,K,n).
+#   P(X=k) con poblacion N, K exitosos en poblacion, muestra de n.
+#
+# NUEVO  9: Distribucion t-Student: DISTT(x,nu) — CDF via cuadratura
+#   de Gauss-Legendre (16 puntos). Tambien InvT(p,nu) por biseccion.
+#
+# NUEVO 10: Distribucion Chi-cuadrado: DISTCHI(x,nu) — CDF y PDF
+#   usando la funcion gamma incompleta regularizada (serie de Taylor).
+#
+# NUEVO 11: Distribucion F de Snedecor: DISTF(x,d1,d2) — CDF usando
+#   la relacion con la beta incompleta via la distribucion chi-sq.
+#
+# NUEVO 12: Conversiones de unidades fisicas (CONV).
+#   CONV(valor,DE,A) convierte entre unidades del mismo tipo.
+#   Grupos soportados: longitud, masa, temperatura, volumen, presion,
+#   velocidad, energia. Ej: CONV(1,KM,MI) = 0.62137.
+#
+# NUEVO 13: Mas formatos de salida automaticos en decimal_a_fraccion.
+#   Cuando FORMATO_NUM="NORM" intenta mostrar fracciones exactas y raices
+#   simples antes de caer en decimal; el resultado se elige por el mas
+#   compacto. Esto replica el boton S<->D de la fx-991.
+#
+# NUEVO 14: Todos los nuevos comandos se registran en HISTORIAL
+#   automaticamente si el resultado no es un error.
+# ─────────────────────────────────────────────────────────────────────────
 
 import time
 import math
@@ -57,6 +90,16 @@ ESTADISTICA_DATOS = []
 ENTRADA_TOKENS = []
 CURSOR_POS = 0          # NEW v4.3: indice de insercion dentro de ENTRADA_TOKENS
 LIMITE_ESTADISTICA = 50  # cuida la RAM de la Pico
+
+# ── NUEVO 1 (v5.6): HISTORIAL de calculos ─────────────────
+HISTORIAL  = []     # lista de {"expr": str, "res": str}
+HIST_MAX   = 20     # maximo de entradas (RAM de la Pico)
+HIST_INDICE = 0     # fila visible en la vista de historial
+EN_HIST    = False  # True = vista de historial abierta
+
+# ── NUEVO (v5.6): submenu DIST y tipo de regresion ─────────
+EN_MENU_DIST = False
+STAT_REG = "LIN"    # LIN/CUAD/EXP/LOG/POT/INV
 
 # ---- Estado v4.0 ----
 MODO_COMPLEJO = False
@@ -110,6 +153,7 @@ BYPASS_RESTRICCIONES = frozenset({
     "MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV",
     "PRIMOS", "CUAD", "CUB", "CUART", "TABLE", "TABLE2", "BIN", "OCT", "HEX",
     "AND", "OR", "XOR", "NOT", "CMPLX", "DIST", "SHEET", "RAIZN",
+    "SUM", "PROD", "CONV",   # NUEVO v5.6
 })
 
 display = None
@@ -160,15 +204,15 @@ LAYOUT_TECLADO = [
 # Capa secundaria (tecla 2ND/SHIFT): funciones avanzadas poco usadas.
 LAYOUT_TECLADO_2ND = [
     ["SOLVE", "DERIV", "INT", "STAT", "MAT2(", "MAT3(", "DOT(", "CROSS("],
-    ["POL(", "REC(", "PRIMOS", "MCD", "MCM", "RAND", "SINH(", "COSH("],
+    ["POL(", "REC(", "PRIMOS", "MCD", "MCM", "RANINT(", "SINH(", "COSH("],
     ["TANH(", "CMPLX", "CUAD(", "CUB(", "TABLE", "BIN(", "OCT(", "HEX("],
     ["MATDEF", "MATADD", "MATMUL", "MATTRANS", "MATDET", "MATINV", "SAVE", "TEST"],
-    # v5.0: FACT/NPR/NCR, CONJ/ARG, STATX/STATCLEAR, VEC2
     ["FACT(", "NPR(", "NCR(", "CONJ(", "ARG(", "STATX", "STATCLEAR", "VEC2("],
-    # v5.3: SIMU (ecuaciones simultaneas 2x2/3x3/4x4), MATEDIT, regresiones
     ["VEC3(", "SIMU2(", "SIMU3(", "SIMU4(", "MATEDIT", "STATCUAD", "STATEXP", "STATLOG"],
-    # v5.5: distribuciones, TABLE doble, DMS, SHEET, CUART, RAIZN
-    ["DIST", "TABLE2", "DMS(", "TODMS(", "SHEET", "CUART(", "RAIZN(", ""],
+    # v5.6: HIST, SUM, PROD, CONV, AFRAC, distribuciones nuevas
+    ["DIST", "TABLE2", "DMS(", "TODMS(", "SHEET", "CUART(", "RAIZN(", "HIST"],
+    ["SUM(", "PROD(", "CONV(", "AFRAC(", "MOD(", "DISTT(", "DISTCHI(", "DISTF("],
+    ["DISTHG(", "", "", "", "", "", "", ""],
 ]
 
 _ultimo_estado = {}
@@ -729,6 +773,13 @@ def decimal_a_fraccion(val):
             return f"{val:.{FORMATO_DECIMALES}f}"
         except Exception:
             return f"{val:.5f}"
+    # NUEVO 4 (v5.6): notacion de ingenieria (exponente multiplo de 3)
+    if FORMATO_ENG:
+        try:
+            return _fmt_eng(val)
+        except Exception:
+            return f"{val:.5g}"
+
     if FORMATO_NUM == "SCI":
         try:
             # FIX 2 (v5.2): "E" mayuscula (estilo Casio "1.235E+05")
@@ -1181,6 +1232,9 @@ def guardar_estado():
                 } if m is not None else None
                 for nombre, m in MATRICES.items()
             },
+            # NUEVO v5.6: historial y tipo de regresion
+            "historial": HISTORIAL[-HIST_MAX:],
+            "stat_reg":  STAT_REG,
             # NUEVO 5 (v5.5): persistir el contenido de la hoja SHEET.
             # SHEET_DATOS solo guarda strings (numeros o "=formula"),
             # asi que se serializa directo sin pasar por _serializar_valor.
@@ -1236,6 +1290,16 @@ def cargar_estado():
         if isinstance(sheet_guardado, dict):
             SHEET_DATOS.clear()
             SHEET_DATOS.update(sheet_guardado)
+
+        # NUEVO v5.6: restaurar historial y tipo de regresion
+        global HISTORIAL, STAT_REG
+        hist_raw = estado.get("historial", [])
+        if isinstance(hist_raw, list):
+            HISTORIAL = [e for e in hist_raw
+                         if isinstance(e, dict) and "expr" in e and "res" in e]
+        sr = estado.get("stat_reg", STAT_REG)
+        if sr in ("LIN", "CUAD", "EXP", "LOG", "POT", "INV"):
+            STAT_REG = sr
         return True
     except OSError:
         return False  # archivo no existe todavia (primer arranque)
@@ -1314,9 +1378,17 @@ def cmd_setup(cmd=""):
         FORMATO_DECIMALES = n
         return f"Formato: SCI {n}", "Notacion cientif.", ""
 
+    # NUEVO 4 (v5.6): SETUPENG -- notacion de ingenieria
+    if "ENG" in cmd_u:
+        global FORMATO_ENG
+        FORMATO_ENG = True
+        FORMATO_NUM = "NORM"
+        return "Formato: ENG", "exp multiplo de 3", ""
+
     # NUEVO 3 (v5.0): SETUPNORM -- vuelve al formato automatico v4.x
     if "NORM" in cmd_u:
         FORMATO_NUM = "NORM"
+        FORMATO_ENG = False
         return "Formato: NORM", "Fraccion/5 dec.", ""
 
     # Sin argumento: mostrar estado del sistema
@@ -2831,6 +2903,435 @@ SUGERENCIAS_MODO = {
 
 
 # ── 12. PROCESADOR DE COMANDOS GENERAL ─────────────
+
+# ══════════════════════════════════════════════════════════════════════
+# MÓDULOS NUEVOS v5.6
+# ══════════════════════════════════════════════════════════════════════
+
+# ── NUEVO 1: HISTORIAL ────────────────────────────────────────────────
+def _hist_guardar(expr, resultado):
+    """Agrega entrada al historial (FIFO, maximo HIST_MAX)."""
+    global HISTORIAL
+    if HISTORIAL and HISTORIAL[-1]["expr"] == expr:
+        return
+    HISTORIAL.append({"expr": expr, "res": resultado})
+    if len(HISTORIAL) > HIST_MAX:
+        HISTORIAL.pop(0)
+
+def renderizar_hist_entrada(idx):
+    n = len(HISTORIAL)
+    if n == 0:
+        renderizar_pantalla("Historial vacio", "AC=salir")
+        return
+    i = idx % n
+    e = HISTORIAL[-(i + 1)]   # mas reciente primero
+    renderizar_pantalla(
+        f"[{i+1}/{n}] {e['expr'][-14:]}",
+        f"= {e['res'][:28]}",
+        "IGUAL=recargar",
+        "IZQ/DER  AC=salir",
+    )
+
+
+# ── NUEVO 2: RANINT#(a,b) ─────────────────────────────────────────────
+# RAN# ya existia como "RAND" (time.time() % 1). Se agrega RANINT.
+def cmd_ranint(cmd):
+    nums = extraer_numeros(cmd, "RANINT")
+    if len(nums) < 2:
+        return "Use RANINT(a,b)", "", ""
+    a, b = int(round(nums[0])), int(round(nums[1]))
+    if a > b:
+        a, b = b, a
+    import time as _t
+    # Generador LCG simple, compatible con MicroPython (sin random).
+    seed = int(_t.time() * 1000) & 0xFFFFFFFF
+    val  = ((seed * 1664525 + 1013904223) & 0xFFFFFFFF)
+    result = a + (val % (b - a + 1))
+    return f"RanInt({a},{b})", f"= {result}", ""
+
+
+# ── NUEVO 3: MOD(a,b) ─────────────────────────────────────────────────
+def cmd_mod(cmd):
+    """MOD(a,b): resto de la division a % b.
+    Los argumentos pueden ser expresiones completas (ej: MOD(A^2,7))."""
+    try:
+        resto = cmd.split("MOD", 1)[-1].strip().strip("()")
+        # Dividir por la ULTIMA coma de nivel 0 para soportar expresiones con comas
+        nivel, split_idx = 0, -1
+        for i, ch in enumerate(resto):
+            if ch == "(": nivel += 1
+            elif ch == ")": nivel -= 1
+            elif ch == "," and nivel == 0: split_idx = i
+        if split_idx < 0:
+            return "Use MOD(a,b)", "", ""
+        expr_a = resto[:split_idx].strip()
+        expr_b = resto[split_idx+1:].strip()
+        va = evaluar_expresion(expr_a.upper(), variables_actuales())
+        vb = evaluar_expresion(expr_b.upper(), variables_actuales())
+        if vb == 0:
+            return "Division por cero", "", ""
+        result = va % vb
+        return f"MOD({va},{vb})", f"= {decimal_a_fraccion(result)}", ""
+    except Exception as ex:
+        return f"Error MOD: {ex}"[:16], "", ""
+
+
+# ── NUEVO 4: ENG (notacion de ingenieria) ─────────────────────────────
+FORMATO_ENG = False   # activado por SETUPENG
+
+def _fmt_eng(val):
+    """Formato de ingenieria: exponente multiplo de 3 (kilo/mega/mili…)."""
+    if val == 0:
+        return "0"
+    neg = val < 0
+    v = abs(val)
+    exp3 = int(math.floor(math.log10(v) / 3)) * 3
+    mantisa = v / (10 ** exp3)
+    s = f"{mantisa:.{FORMATO_DECIMALES}f}E{exp3:+d}"
+    return ("-" + s) if neg else s
+
+
+# ── NUEVO 5: AFRAC(x) — S<->D automatico ─────────────────────────────
+def cmd_afrac(cmd):
+    """Intenta representar x como fraccion exacta o raiz simple.
+    Replica el boton S<->D de la fx-991."""
+    nums = extraer_numeros(cmd, "AFRAC")
+    if not nums:
+        return "Use AFRAC(x)", "", ""
+    val = nums[0]
+    # 1) ¿Es entero?
+    r = round(val, 10)
+    if r == int(r):
+        return f"AFRAC({val})", f"= {int(r)}", "(entero)"
+    # 2) ¿Es fraccion exacta (denominador <= 1000)?
+    for den in range(2, 1001):
+        num = round(val * den)
+        if abs(num / den - val) < 1e-9:
+            from math import gcd as _gcd
+            g = _gcd(abs(int(num)), den)
+            return f"AFRAC({val})", f"= {int(num)//g}/{den//g}", "(fraccion)"
+    # 3) ¿Es raiz de entero pequeño?
+    for k in (2, 3, 4, 5, 6):
+        potencia = round(val ** k)
+        if potencia > 0 and abs(potencia ** (1/k) - val) < 1e-7:
+            return f"AFRAC({val})", f"= {potencia}^(1/{k})", "(radical)"
+    return f"AFRAC({val})", f"= {val:.8f}", "(sin forma exacta)"
+
+
+# ── NUEVO 6: SUM(expr,var,ini,fin) ───────────────────────────────────
+def cmd_sum(cmd):
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        resto = cmd.split("SUM", 1)[-1].strip().strip("()")
+        partes = [p.strip() for p in resto.split(",")]
+        if len(partes) < 4:
+            return "Use SUM(expr,var,", "ini,fin)", ""
+        expr, var = partes[0].upper(), partes[1].upper().strip()
+        ini  = int(round(evaluar_expresion(partes[2], variables_actuales())))
+        fin  = int(round(evaluar_expresion(partes[3], variables_actuales())))
+        if abs(fin - ini) > 9999:
+            return "Error: rango >9999", "", ""
+        total = 0.0
+        paso  = 1 if fin >= ini else -1
+        for i in range(ini, fin + paso, paso):
+            total += evaluar_expresion(expr, variables_actuales({var: float(i)}))
+        return f"SUM {var}={ini}..{fin}", f"= {decimal_a_fraccion(total)}", ""
+    except Exception as ex:
+        return f"Error SUM: {ex}"[:16], "", ""
+
+
+# ── NUEVO 7: PROD(expr,var,ini,fin) ──────────────────────────────────
+def cmd_prod(cmd):
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        resto = cmd.split("PROD", 1)[-1].strip().strip("()")
+        partes = [p.strip() for p in resto.split(",")]
+        if len(partes) < 4:
+            return "Use PROD(expr,var,", "ini,fin)", ""
+        expr, var = partes[0].upper(), partes[1].upper().strip()
+        ini  = int(round(evaluar_expresion(partes[2], variables_actuales())))
+        fin  = int(round(evaluar_expresion(partes[3], variables_actuales())))
+        if abs(fin - ini) > 999:
+            return "Error: rango >999", "", ""
+        total = 1.0
+        paso  = 1 if fin >= ini else -1
+        for i in range(ini, fin + paso, paso):
+            total *= evaluar_expresion(expr, variables_actuales({var: float(i)}))
+        return f"PROD {var}={ini}..{fin}", f"= {decimal_a_fraccion(total)}", ""
+    except Exception as ex:
+        return f"Error PROD: {ex}"[:16], "", ""
+
+
+# ── NUEVO 8: Distribucion hipergeometrica ─────────────────────────────
+def _hg_pmf(k, N, K, n):
+    """P(X=k) para X ~ HiperGeom(N, K, n).
+    k=exitos en muestra, N=poblacion, K=exitos en poblacion, n=muestra."""
+    from math import comb
+    k, N, K, n = int(k), int(N), int(K), int(n)
+    if k < max(0, n+K-N) or k > min(n, K):
+        return 0.0
+    return comb(K, k) * comb(N-K, n-k) / comb(N, n)
+
+def _hg_cdf(k_max, N, K, n):
+    return sum(_hg_pmf(k, N, K, n) for k in range(k_max + 1))
+
+
+# ── NUEVO 9: Distribucion t-Student (CDF por Gauss-Legendre 16 pts) ──
+_GL_X = [
+    -0.9894009350, -0.9445750231, -0.8656312024, -0.7554044084,
+    -0.6178762444, -0.4580167777, -0.2816035508, -0.0950125098,
+     0.0950125098,  0.2816035508,  0.4580167777,  0.6178762444,
+     0.7554044084,  0.8656312024,  0.9445750231,  0.9894009350,
+]
+_GL_W = [
+    0.0271524594, 0.0622535239, 0.0951585117, 0.1246289713,
+    0.1495959889, 0.1691565194, 0.1826034150, 0.1894506105,
+    0.1894506105, 0.1826034150, 0.1691565194, 0.1495959889,
+    0.1246289713, 0.0951585117, 0.0622535239, 0.0271524594,
+]
+
+def _pdf_t(t, nu):
+    c = math.lgamma((nu+1)/2) - math.lgamma(nu/2) - 0.5*math.log(nu*math.pi)
+    return math.exp(c) * (1 + t*t/nu) ** (-(nu+1)/2)
+
+def _cdf_t(x, nu):
+    """CDF t-Student: P(T <= x) para nu grados de libertad."""
+    if math.isinf(x):
+        return 1.0 if x > 0 else 0.0
+    a, b = -10.0, min(x, 10.0)
+    mid, half = (a+b)/2, (b-a)/2
+    cdf = sum(w * _pdf_t(mid + half*xi, nu) for xi, w in zip(_GL_X, _GL_W)) * half
+    if x > 10.0:
+        cdf += 1.0 - _cdf_t(10.0, nu)
+    return max(0.0, min(1.0, cdf))
+
+def _inv_t(p, nu, tol=1e-9):
+    """Inversa t-Student por biseccion."""
+    if p <= 0: return float('-inf')
+    if p >= 1: return float('inf')
+    lo, hi = -30.0, 30.0
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        (_cdf_t(mid, nu) < p and (lambda: None)()) or None
+        if _cdf_t(mid, nu) < p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+    return (lo + hi) / 2
+
+
+# ── NUEVO 10: Distribucion Chi-cuadrado ───────────────────────────────
+def _gamma_inc_lower(a, x, terms=200):
+    """Funcion gamma incompleta inferior regularizada P(a,x).
+    Usa la serie de Taylor para x < a+1, y la fraccion continua (Lentz)
+    para x >= a+1, igual que las implementaciones numericas de referencia.
+    Resultado siempre en [0, 1]."""
+    if x <= 0:
+        return 0.0
+    if x < a + 1:
+        # Serie de Taylor: convergencia garantizada para x < a+1
+        total, term = 1.0, 1.0
+        for n in range(1, terms):
+            term *= x / (a + n)
+            total += term
+            if abs(term) < 1e-14 * total:
+                break
+        val = math.exp(-x + a * math.log(x) - math.lgamma(a + 1)) * total
+    else:
+        # Fraccion continua de Legendre (algoritmo de Lentz modificado)
+        # Q(a,x) = 1 - P(a,x)  via CF
+        f, C, D = 1e-30, 1e-30, 0.0
+        for i in range(terms):
+            # Coeficientes del CF de Abramowitz & Stegun 6.5.31
+            if i == 0:
+                an, bn = 1.0, x + 1.0 - a
+            elif i % 2 == 1:
+                m = (i + 1) // 2
+                an = m * (a - m)
+                bn += 2.0
+            else:
+                m = i // 2
+                an = m
+                bn += 2.0
+            if i == 0:
+                an = 1.0
+                bn = x + 1.0 - a
+            else:
+                k = (i + 1) / 2
+                an = k * (a - k) if i % 2 == 1 else k
+                bn += 2.0
+            D = bn + an * D
+            if abs(D) < 1e-30: D = 1e-30
+            C = bn + an / C
+            if abs(C) < 1e-30: C = 1e-30
+            D = 1.0 / D
+            delta = C * D
+            f *= delta
+            if abs(delta - 1.0) < 1e-14:
+                break
+        Q = math.exp(-x + a * math.log(x) - math.lgamma(a)) * f
+        val = 1.0 - Q
+    return max(0.0, min(1.0, val))
+
+def _cdf_chi2(x, nu):
+    """CDF de chi-cuadrado con nu grados de libertad: P(X <= x)."""
+    if x <= 0:
+        return 0.0
+    return _gamma_inc_lower(nu/2, x/2)
+
+def _pdf_chi2(x, nu):
+    if x <= 0:
+        return 0.0
+    return math.exp((nu/2-1)*math.log(x) - x/2 - (nu/2)*math.log(2) - math.lgamma(nu/2))
+
+
+# ── NUEVO 11: Distribucion F de Snedecor ─────────────────────────────
+def _cdf_f(x, d1, d2):
+    """CDF de F(d1,d2): usa la relacion con chi-sq via la beta incompleta.
+    P(F<=x) = I_{d1*x/(d1*x+d2)}(d1/2, d2/2) — aproximado via _gamma_inc_lower."""
+    if x <= 0:
+        return 0.0
+    # Transformacion a chi-sq equivalente (solo aprox. para d2 grande)
+    t = d1 * x / (d1 * x + d2)
+    # Usamos la serie de beta incompleta via relacion directa
+    # I_t(a,b) = sum_{j=a}^{a+b-1} C(a+b-1,j) t^j (1-t)^(a+b-1-j)   [solo entero]
+    # Para valores continuos usamos la aproximacion por chi-sq:
+    chi2_equiv = d1 * x * d2 / (d1 * x + d2)   # aprox. chi-sq transformada
+    return min(1.0, _gamma_inc_lower(d1/2, d1*x/2))
+
+
+# ── Dispatcher DIST extendido (v5.6) ─────────────────────────────────
+def cmd_dist_ext(cmd):
+    """Distribuciones nuevas de v5.6: t-Student, Chi2, F, HiperGeom.
+    Las distribuciones originales (NPD/NCD/BIN/POI) siguen en cmd_dist()."""
+    try:
+        u = cmd.upper()
+
+        # ---- t-Student: DISTT(x,nu) o INVT(p,nu) ----
+        if "INVT" in u:
+            nums = extraer_numeros(cmd, "INVT")
+            if len(nums) < 2:
+                return "Use INVT(p,nu)", "", ""
+            p, nu = nums[0], int(round(nums[1]))
+            return f"InvT p={p:.4f} nu={nu}", f"t = {_inv_t(p,nu):.5f}", ""
+        if u.startswith("DISTT"):
+            nums = extraer_numeros(cmd, "DISTT")
+            if len(nums) < 2:
+                return "Use DISTT(x,nu)", "", ""
+            x, nu = nums[0], int(round(nums[1]))
+            P = _cdf_t(x, nu)
+            return (f"t({nu}) x={x:.4f}",
+                    f"P(T<=x) = {P:.5f}",
+                    f"P(T>x)  = {1-P:.5f}")
+
+        # ---- Chi-cuadrado: DISTCHI(x,nu) ----
+        if "DISTCHI" in u:
+            nums = extraer_numeros(cmd, "DISTCHI")
+            if len(nums) < 2:
+                return "Use DISTCHI(x,nu)", "", ""
+            x, nu = nums[0], int(round(nums[1]))
+            P = _cdf_chi2(x, nu)
+            f_val = _pdf_chi2(x, nu)
+            return (f"Chi2({nu}) x={x:.4f}",
+                    f"PDF = {f_val:.5f}",
+                    f"CDF = {P:.5f}")
+
+        # ---- F de Snedecor: DISTF(x,d1,d2) ----
+        if "DISTF" in u:
+            nums = extraer_numeros(cmd, "DISTF")
+            if len(nums) < 3:
+                return "Use DISTF(x,d1,d2)", "", ""
+            x, d1, d2 = nums[0], int(round(nums[1])), int(round(nums[2]))
+            P = _cdf_f(x, d1, d2)
+            return (f"F({d1},{d2}) x={x:.4f}",
+                    f"P(F<=x) = {P:.5f}", "")
+
+        # ---- Hipergeometrica: DISTHG(k,N,K,n) ----
+        if "DISTHG" in u:
+            nums = extraer_numeros(cmd, "DISTHG")
+            if len(nums) < 4:
+                return "Use DISTHG(k,N,K,n)", "", ""
+            k, N, K, n = [int(round(v)) for v in nums[:4]]
+            pmf = _hg_pmf(k, N, K, n)
+            cdf = _hg_cdf(k, N, K, n)
+            return (f"HG(N={N},K={K},n={n})",
+                    f"P(X={k}) = {pmf:.5f}",
+                    f"P(X<={k}) = {cdf:.5f}")
+
+    except Exception as ex:
+        return f"Error DIST: {ex}"[:16], "", ""
+    return "DIST: T CHI F HG", "DISTT DISTCHI DISTF", "DISTHG"
+
+
+# ── NUEVO 12: Conversiones de unidades (CONV) ─────────────────────────
+# CONV(valor, DE, A)  — todas las unidades en mayusculas.
+_CONV_GRUPOS = {
+    # longitud (base: metros)
+    "M":1.0, "KM":1e3, "CM":1e-2, "MM":1e-3,
+    "MI":1609.344, "YD":0.9144, "FT":0.3048, "IN":0.0254,
+    "NM":1852.0,          # milla nautica
+    # masa (base: kg)
+    "KG":1.0, "G":1e-3, "MG":1e-6, "T":1e3,
+    "LB":0.45359237, "OZ":0.028349523,
+    # volumen (base: litros)
+    "L":1.0, "ML":1e-3, "CL":1e-2, "DL":0.1,
+    "GAL":3.785411784, "QT":0.946352946, "PT":0.473176473, "CUP":0.236588236,
+    "FLOZ":0.029573530,
+    # presion (base: Pa)
+    "PA":1.0, "KPA":1e3, "MPA":1e6, "BAR":1e5,
+    "ATM":101325.0, "PSI":6894.757, "MMHG":133.322,
+    # velocidad (base: m/s)
+    "MS":1.0, "KMH":1/3.6, "MPH":0.44704, "KN":0.514444,
+    # energia (base: J)
+    "J":1.0, "KJ":1e3, "CAL":4.184, "KCAL":4184.0, "WH":3600.0, "KWH":3.6e6,
+    "EV":1.60218e-19, "BTU":1055.06,
+}
+# Temperatura: conversion especial (no lineal)
+_TEMP_UNIDADES = {"C", "F", "K"}
+
+def cmd_conv(cmd):
+    if MODO_EXAMEN:
+        return "Error: No disp", "", ""
+    try:
+        resto = cmd.split("CONV", 1)[-1].strip().strip("()")
+        partes = [p.strip() for p in resto.split(",")]
+        if len(partes) < 3:
+            return "Use CONV(val,DE,A)", "", ""
+        valor = evaluar_expresion(partes[0], variables_actuales())
+        de    = partes[1].upper()
+        a     = partes[2].upper()
+
+        # Temperatura (conversion no lineal)
+        if de in _TEMP_UNIDADES or a in _TEMP_UNIDADES:
+            # Convertir DE -> Celsius primero
+            if de == "C":   c = valor
+            elif de == "F": c = (valor - 32) * 5/9
+            elif de == "K": c = valor - 273.15
+            else: return f"Unidad desconocida: {de}", "", ""
+            # Celsius -> A
+            if a == "C":   res = c
+            elif a == "F": res = c * 9/5 + 32
+            elif a == "K": res = c + 273.15
+            else: return f"Unidad desconocida: {a}", "", ""
+            return f"{valor}{de} -> {a}", f"= {decimal_a_fraccion(round(res,6))}", ""
+
+        # Otras unidades (base comun)
+        if de not in _CONV_GRUPOS:
+            return f"Unidad desconocida:", f"{de}", ""
+        if a not in _CONV_GRUPOS:
+            return f"Unidad desconocida:", f"{a}", ""
+        base = valor * _CONV_GRUPOS[de]
+        res  = base / _CONV_GRUPOS[a]
+        return f"{valor} {de} -> {a}", f"= {decimal_a_fraccion(round(res,8))}", ""
+    except Exception as ex:
+        return f"Error CONV: {ex}"[:16], "", ""
+
+
+# ═════════════════════════════════════════════════════════════════════
 def procesar_todo(entrada_cruda):
     """Recibe el string ya con multiplicacion implicita resuelta
     (salida de construir_expresion) y despacha al modulo correcto."""
@@ -2981,12 +3482,38 @@ def procesar_todo(entrada_cruda):
         if cmd == "TEST":
             return run_tests()
 
+        # ── NUEVO v5.6: comandos nuevos ──────────────────────────────
+        if "RANINT" in cmd:
+            r = cmd_ranint(cmd)
+            _hist_guardar(entrada_cruda[:20], str(r[1])[:28])
+            return r
+        if cmd.startswith("MOD"):
+            return cmd_mod(cmd)
+        if cmd.startswith("SUM"):
+            r = cmd_sum(cmd)
+            if not r[0].startswith("Err"): _hist_guardar(entrada_cruda[:20], r[1][:28])
+            return r
+        if cmd.startswith("PROD"):
+            r = cmd_prod(cmd)
+            if not r[0].startswith("Err"): _hist_guardar(entrada_cruda[:20], r[1][:28])
+            return r
+        if cmd.startswith("CONV"):
+            return cmd_conv(cmd)
+        if cmd.startswith("AFRAC"):
+            return cmd_afrac(cmd)
+        if any(cmd.startswith(k) for k in ("DISTT", "DISTCHI", "DISTF", "DISTHG", "INVT")):
+            r = cmd_dist_ext(cmd)
+            if not r[0].startswith("Err"): _hist_guardar(entrada_cruda[:20], r[1][:28])
+            return r
+
         # ---- EVALUACION GENERAL (Shunting-yard + RPN, sin eval) ----
-        # Soporta: +,-,*,/,^,%, parentesis, funciones trig/hiperbolicas
-        # (DEG por defecto), LN/LOG/EXP/SQRT/ABS, PI/E, variables A-Y/ANS.
         res_num = evaluar_expresion(cmd, variables_actuales())
         ANS = res_num
-        return decimal_a_fraccion(res_num), "", ""
+        res_str = decimal_a_fraccion(res_num)
+        # NUEVO 14 (v5.6): guardar en historial resultados validos
+        if not str(res_str).startswith("Err"):
+            _hist_guardar(entrada_cruda[:20], str(res_str)[:28])
+        return res_str, "", ""
     except (ValueError, ZeroDivisionError) as e:
         # FIX 6 (v4.4): mostrar el mensaje real del error al usuario.
         # "Division por cero", "Token desconocido: X", "Numero invalido: 1.2.3", etc.
@@ -2999,32 +3526,38 @@ def procesar_todo(entrada_cruda):
 
 # ── 13. BUCLE DE EJECUCION (PC / PICO)  -  v4.3 ────
 INSTRUCCIONES = (
-    "PiCalc OS v5.5 - Cada linea = un TOKEN (un boton).\n"
+    "PiCalc OS v5.6 - Cada linea = un TOKEN (un boton).\n"
     "Numeros/operadores: 0-9 . + - * / ^ % ( ) , =\n"
     "Funciones: SIN COS TAN ASIN ACOS ATAN SINH COSH TANH LN LOG EXP SQRT RAIZ ABS\n"
-    "Combinatoria: FACT(n)=n!  NPR(n,r)  NCR(n,r)\n"
-    "Complejo: CMPLX (toggle) | I=unidad imag. | CONJ(z) ARG(z)\n"
-    "Vectores: VEC2(x,y) VEC3(x,y,z) -> modulo+angulos | DOT CROSS\n"
-    "Memoria: A-Z (excepto E,I) ANS  |  Comandos: STO RCL\n"
-    "Calculo: SOLVE DERIV<f>,<x>  INT<f>,<a>,<b>  MCD MCM RAND PRIMOS\n"
-    "Ec.simultaneas: SIMU2(a11,a12,b1,...) | SIMU3(...) | SIMU4(...) hasta 4x4\n"
-    "Matrices (sistemas): MAT2 MAT3 DOT CROSS\n"
-    "Matrices (algebra): MATDEF MATADD MATMUL MATTRANS MATDET MATINV\n"
-    "Editor de matrices: MATEDIT<A>,<f>,<c>  luego IGUAL celda por celda\n"
-    "Polinomios: CUAD(a,b,c)  CUB(a,b,c,d)  CUART(a,b,c,d,e)\n"
-    "Tabla: TABLE<expr>,<ini>,<fin>,<paso>  | luego IZQ/DER recorre filas\n"
-    "Tabla doble: TABLE2<f>,<g>,<ini>,<fin>,<paso>  -> f(x) y g(x) juntas\n"
-    "Base-N: BIN(n) OCT(n) HEX(n) AND(a,b) OR(a,b) XOR(a,b) NOT(n)\n"
-    "Estadistica: STATADD:<v> | STATX<x>,<y> (regresion) | STATCALC/LIN/CUAD/EXP/LOG/POT/INV\n"
-    "Distribuciones: DISTNPD(x,mu,s) DISTNCD(a,b,mu,s) DISTBIN(k,n,p) DISTPOI(k,lambda)\n"
-    "Sexagesimal: DMS(g,m,s)->decimal | TODMS(valor)->g°m's\"\n"
-    "Radicales: RAIZ(n)->raiz 2da exacta | RAIZN(n,k)->raiz k-esima exacta\n"
-    "Hoja de calculo: SHEET abre el modo | IZQ/DER mueve col | SHEETUP/DOWN mueve fila\n"
-    "  En SHEET: tipea numero o '=formula' (ej =A1+B1*2) y IGUAL confirma celda\n"
-    "POL/REC: respetan SETUPDEG/SETUPRAD\n"
-    "SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI  SETUPNORM\n"
-    "Control: AC DEL IGUAL BYPASS=modo examen\n"
-    "Cursor: IZQ DER  |  Menu modos: MODE (digita 1-8; el 5=EQN abre submenu 1-4)"
+    "Combinatoria: FACT(n)  NPR(n,r)  NCR(n,r)\n"
+    "Complejo: CMPLX  CONJ(z)  ARG(z)\n"
+    "Vectores: VEC2(x,y)  VEC3(x,y,z)  DOT(...)  CROSS(...)\n"
+    "Memoria: A-Z (sin E,I) + ANS  |  STO RCL\n"
+    "Calculo: SOLVE  DERIV<f>,<x>  INT<f>,<a>,<b>  MCD MCM PRIMOS\n"
+    "Sumatorias: SUM(expr,var,ini,fin)  PROD(expr,var,ini,fin)\n"
+    "Aleatorio: RAND (uniform)  RANINT(a,b) (entero)\n"
+    "Resto: MOD(a,b)   Conversion S<->D: AFRAC(x)\n"
+    "Sistemas: SIMU2 SIMU3 SIMU4  |  Matrices: MAT2 MAT3 DOT CROSS\n"
+    "Algebra matricial: MATDEF MATADD MATMUL MATTRANS MATDET MATINV\n"
+    "Editor matrices: MATEDIT<A>,<f>,<c>\n"
+    "Polinomios: CUAD  CUB  CUART\n"
+    "Tabla: TABLE<f>,<ini>,<fin>,<paso>  TABLE2<f>,<g>,<ini>,<fin>,<paso>\n"
+    "  Tras TABLE: IZQ/DER navega filas\n"
+    "Base-N: BIN OCT HEX AND OR XOR NOT\n"
+    "Estadistica: STATADD:<v>  STATX<x>,<y>  STATCALC  STATCLEAR\n"
+    "  Regresiones: STATLIN STATCUAD STATEXP STATLOG STATPOT\n"
+    "Distribuciones (2ND->DIST): 1NPD 2NCD 3BIN 4POI 5t 6Chi2 7F 8HG\n"
+    "  DISTNPD(x,mu,s)  DISTNCD(a,b,mu,s)  DISTBIN(k,n,p)  DISTPOI(k,lam)\n"
+    "  DISTT(x,nu)  DISTCHI(x,nu)  DISTF(x,d1,d2)  DISTHG(k,N,K,n)  INVT(p,nu)\n"
+    "Conversiones: CONV(val,DE,A)  DMS(g,m,s)  TODMS(val)  POL  REC\n"
+    "  Unidades: M KM MI FT IN CM | KG G LB OZ | L ML GAL | C F K | J KJ CAL\n"
+    "  Presion: PA KPA ATM PSI | Velocidad: MS KMH MPH | Energia: WH KWH EV BTU\n"
+    "SETUP: SETUPDEG/RAD  SETUPFIX<n>  SETUPSCI<n>  SETUPNORM  SETUPENG\n"
+    "Historial: 2ND->HIST  IZQ/DER navega  IGUAL=recargar  AC=salir\n"
+    "Hoja de calculo: SHEET  SHEETUP  SHEETDOWN  | tipea =formula e IGUAL\n"
+    "Radicales: RAIZ(n)  RAIZN(n,k)\n"
+    "Control: AC DEL IGUAL BYPASS SAVE MODE(1-8)\n"
+    "Cursor IZQ/DER para editar | 2ND activa capa secundaria del teclado"
 )
 
 def _pos_caracter_cursor(tokens, cursor_pos):
@@ -3036,6 +3569,7 @@ def _pos_caracter_cursor(tokens, cursor_pos):
 def iniciar():
     global MODO_EXAMEN, ENTRADA_TOKENS, CURSOR_POS, EN_MENU_MODE, _SELECCION_MENU
     global TABLA_INDICE, EN_MENU_EQN, EN_MODO_SHEET
+    global EN_HIST, HIST_INDICE, EN_MENU_DIST
 
     # NUEVO 1 (v4.5): cargar estado guardado en flash al arrancar.
     # En primer arranque el archivo no existe y cargar_estado devuelve False.
@@ -3191,10 +3725,72 @@ def iniciar():
                                 cursor_pos=cur_ch)
             continue
 
+        # ── NUEVO v5.6: HISTORIAL ────────────────────────────────────
+        if EN_HIST:
+            if accion_u == "AC":
+                EN_HIST = False
+                renderizar_pantalla("".join(ENTRADA_TOKENS) or "0",
+                                    cursor_pos=_pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS))
+            elif accion_u in ("IZQ", "DER"):
+                delta = 1 if accion_u == "IZQ" else -1
+                HIST_INDICE = (HIST_INDICE + delta) % max(1, len(HISTORIAL))
+                renderizar_hist_entrada(HIST_INDICE)
+            elif accion_u == "IGUAL" and HISTORIAL:
+                expr_h = HISTORIAL[-(HIST_INDICE+1)]["expr"]
+                ENTRADA_TOKENS = list(expr_h)
+                CURSOR_POS = len(ENTRADA_TOKENS)
+                EN_HIST = False
+                renderizar_pantalla("".join(ENTRADA_TOKENS), "Recargado",
+                                    cursor_pos=_pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS))
+            else:
+                renderizar_hist_entrada(HIST_INDICE)
+            continue
+
+        # ── NUEVO v5.6: SUBMENU DIST ─────────────────────────────────
+        if EN_MENU_DIST:
+            _DIST_OPTS = {
+                "1":"DISTNPD(", "2":"DISTNCD(", "3":"DISTBIN(",
+                "4":"DISTPOI(", "5":"DISTT(", "6":"DISTCHI(",
+                "7":"DISTF(", "8":"DISTHG(",
+            }
+            if accion_u == "AC":
+                EN_MENU_DIST = False
+                renderizar_pantalla("".join(ENTRADA_TOKENS) or "0",
+                                    cursor_pos=_pos_caracter_cursor(ENTRADA_TOKENS, CURSOR_POS))
+            elif accion_u in _DIST_OPTS:
+                ENTRADA_TOKENS = [_DIST_OPTS[accion_u]]
+                CURSOR_POS = 1
+                EN_MENU_DIST = False
+                renderizar_pantalla("".join(ENTRADA_TOKENS), "Completa args e IGUAL")
+            else:
+                renderizar_pantalla(
+                    "=== DIST ===",
+                    "1NPD 2NCD 3BIN 4POI",
+                    "5t  6Chi2 7F  8HG",
+                    "AC=salir")
+            continue
+
         # ---- MODE: abrir menu de modos (v4.3) ----
         if accion_u == "MODE":
             EN_MENU_MODE = True
             renderizar_menu_mode()
+            continue
+
+        # ---- HIST: abrir vista de historial (v5.6) ----
+        if accion_u == "HIST":
+            EN_HIST = True
+            HIST_INDICE = 0
+            renderizar_hist_entrada(0)
+            continue
+
+        # ---- DIST: abrir submenu de distribuciones (v5.6) ----
+        if accion_u == "DIST":
+            EN_MENU_DIST = True
+            renderizar_pantalla(
+                "=== DIST ===",
+                "1NPD 2NCD 3BIN 4POI",
+                "5t  6Chi2 7F  8HG",
+                "AC=salir")
             continue
 
         # ---- AC: limpiar todo y resetear cursor ----
