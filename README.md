@@ -122,6 +122,9 @@ El firmware ha evolucionado a través de dos grandes etapas: la etapa de **Simul
     * **MONITOREO DE RAM EN TIEMPO REAL:** Integración del módulo de recolección de basura `gc` (Garbage Collector). Se diseñó la función interna `MOSTRAR_MEM_DISP()` para calcular de forma dinámica los bytes libres en el Heap del microcontrolador.
     * **PREVENCIÓN DE DESBORDES DE PILA:** El menú de estadísticas (`STAT`) y el generador de tablas de funciones (`TABLE`) ahora realizan un chequeo preventivo de memoria RAM disponible antes de poblar listas extensas, evitando congelamientos críticos o excepciones de tipo `MemoryError`.
     * **OPTIMIZACIÓN MANUAL DEL RECOLECTOR:** Inserción de llamadas explícitas a `gc.collect()` en los puntos de retorno de operaciones matriciales pesadas y limpiezas de búfer (`AC`), liberando bloques residuales de memoria muerta de manera inmediata.
+* **picalc_os_v5.3 (Recolección Automática de Basura en el Bucle Principal):**
+    * **RECOLECCIÓN AUTOMÁTICA EN INICIAR():** Se integraron llamadas estratégicas a `gc.collect()` directamente dentro del bucle de eventos principal (`iniciar()`). El sistema ahora fuerza la liberación instantánea de bloques de RAM huérfanos cada vez que se procesa una expresión con la tecla `IGUAL` o se limpia el búfer de entrada con la tecla `AC`.
+    * **MITIGACIÓN DE LA FRAGMENTACIÓN DEL HEAP:** Esta rutina pasiva asegura que la memoria dinámica de la Raspberry Pi Pico se desfragmente de forma continua durante el uso cotidiano, eliminando los residuos que dejan atrás los cálculos pesados en los modos `MATRIX`, `STAT` y `TABLE` antes de que puedan provocar un desborde.
     * 
 ---
 
